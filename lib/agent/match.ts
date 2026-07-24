@@ -52,7 +52,7 @@ export interface MatchProfile {
   location: string | null;
   skills: string[];
   projects: MatchProject[];
-  embedding: number[]; // 3072-dim, from profiles.embedding
+  embedding: number[]; // 1024-dim (Voyage voyage-4), from profiles.embedding
   // Rich free-text the LLM re-rank reads (resume summary + experience). Kept
   // separate from `embedding` so the LLM sees prose, not a vector.
   summaryText: string;
@@ -166,6 +166,12 @@ const ROLE_KEYWORDS: Record<string, string[]> = {
   ],
 };
 
+// "any"/"all"/empty means the user wants every kind of role surfaced, not just
+// engineering — the title filter is skipped entirely in that case.
+function isAnyRole(roleFocus: string): boolean {
+  return ["any", "all", "anything", "", "everything"].includes(roleFocus.trim().toLowerCase());
+}
+
 function roleKeywords(roleFocus: string): string[] {
   const key = roleFocus.trim().toLowerCase();
   const preset = ROLE_KEYWORDS[key];
@@ -236,8 +242,10 @@ interface Candidate {
 }
 
 async function ruleFilter(opts: MatchOptions, dropSeniorTitles: boolean): Promise<Candidate[]> {
-  const kws = roleKeywords(opts.roleFocus);
-  const roleCond = or(...kws.map((k) => ilike(jobs.title, `%${k}%`)));
+  // Skip the title filter entirely for an "any" role search (show all job types).
+  const roleCond = isAnyRole(opts.roleFocus)
+    ? undefined
+    : or(...roleKeywords(opts.roleFocus).map((k) => ilike(jobs.title, `%${k}%`)));
 
   const conds: (SQL | undefined)[] = [
     eq(jobs.isActive, true),
