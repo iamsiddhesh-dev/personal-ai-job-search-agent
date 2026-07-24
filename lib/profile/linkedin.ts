@@ -15,7 +15,7 @@ export async function parseLinkedinInput(input: {
   url?: string;
 }): Promise<LinkedinResult> {
   if (input.bytes) {
-    const text = await extractResumeText(input.bytes);
+    const text = await extractResumeText(input.bytes, "pdf");
     return { text, note: null };
   }
   if (input.url) {

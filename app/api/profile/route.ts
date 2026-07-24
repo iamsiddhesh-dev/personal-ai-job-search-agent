@@ -3,16 +3,12 @@ import { profiles } from "@/db/schema";
 import { eq } from "drizzle-orm";
 import { getOrCreateSingleUser } from "@/lib/user";
 import { uploadResume } from "@/lib/storage";
-import { parseResume } from "@/lib/profile/resume";
-import { fetchGithubProfile } from "@/lib/profile/github";
+import { parseResume, detectResumeKind } from "@/lib/profile/resume";
+import { fetchGithubProfile, parseGithubUsername } from "@/lib/profile/github";
 import { parseLinkedinInput } from "@/lib/profile/linkedin";
 import { mergeProfile } from "@/lib/profile/merge";
 
 const MAX_RESUME_BYTES = 5 * 1024 * 1024;
-const ALLOWED_RESUME_TYPES = new Set([
-  "application/pdf",
-  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-]);
 
 export async function POST(req: Request) {
   const form = await req.formData();
@@ -45,18 +41,22 @@ export async function POST(req: Request) {
 
   if (hasResume) {
     const file = resumeFile as File;
-    if (!ALLOWED_RESUME_TYPES.has(file.type)) {
-      return Response.json({ error: `Unsupported resume file type: ${file.type}. Use PDF or DOCX.` }, { status: 400 });
+    const kind = detectResumeKind(file.type, file.name);
+    if (!kind) {
+      return Response.json(
+        { error: `Unsupported resume file type: ${file.type || file.name}. Use PDF, DOCX, or TXT.` },
+        { status: 400 },
+      );
     }
     if (file.size > MAX_RESUME_BYTES) {
       return Response.json({ error: "Resume exceeds 5 MB limit." }, { status: 400 });
     }
     const bytes = new Uint8Array(await file.arrayBuffer());
-    const extension = file.name.split(".").pop() || "pdf";
+    const extension = file.name.split(".").pop() || kind;
     resumePath = await uploadResume(userId, Buffer.from(bytes), extension);
     resumeFilename = file.name;
     try {
-      const parsed = await parseResume(bytes);
+      const parsed = await parseResume(bytes, kind);
       resumeText = parsed.text;
       resumeFacts = parsed.facts;
     } catch (err) {
@@ -67,7 +67,7 @@ export async function POST(req: Request) {
   let github = null as Awaited<ReturnType<typeof fetchGithubProfile>> | null;
   if (hasGithub) {
     try {
-      github = await fetchGithubProfile(githubUsername!);
+      github = await fetchGithubProfile(parseGithubUsername(githubUsername!));
     } catch (err) {
       notes.push(`Couldn't fetch GitHub profile: ${(err as Error).message}`);
     }

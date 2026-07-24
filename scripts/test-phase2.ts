@@ -26,7 +26,7 @@ async function main() {
 
   const bytes = new Uint8Array(await readFile(FIXTURE_PATH));
   console.log("--- Parsing resume ---");
-  const { text, facts } = await parseResume(bytes);
+  const { text, facts } = await parseResume(bytes, "pdf");
   console.log(`Extracted ${text.length} chars of resume text.`);
   console.log(JSON.stringify(facts, null, 2));
 

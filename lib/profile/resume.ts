@@ -2,8 +2,23 @@
 // bytes came from (upload, test fixture) is the caller's problem.
 
 import { getDocumentProxy, extractText } from "unpdf";
+import mammoth from "mammoth";
 import { z } from "zod";
 import { extractStructured } from "@/lib/llm";
+
+export type ResumeFileKind = "pdf" | "docx" | "txt";
+
+export function detectResumeKind(mimeType: string, filename: string): ResumeFileKind | null {
+  const name = filename.toLowerCase();
+  if (mimeType === "application/pdf" || name.endsWith(".pdf")) return "pdf";
+  if (
+    mimeType === "application/vnd.openxmlformats-officedocument.wordprocessingml.document" ||
+    name.endsWith(".docx")
+  )
+    return "docx";
+  if (mimeType === "text/plain" || name.endsWith(".txt")) return "txt";
+  return null;
+}
 
 export const resumeFactsSchema = z.object({
   name: z.string().nullable(),
@@ -40,11 +55,19 @@ export const resumeFactsSchema = z.object({
 });
 export type ResumeFacts = z.infer<typeof resumeFactsSchema>;
 
-export async function extractResumeText(bytes: Uint8Array): Promise<string> {
-  const pdf = await getDocumentProxy(bytes);
-  const { text } = await extractText(pdf, { mergePages: true });
+export async function extractResumeText(bytes: Uint8Array, kind: ResumeFileKind): Promise<string> {
+  let text: string;
+  if (kind === "pdf") {
+    const pdf = await getDocumentProxy(bytes);
+    ({ text } = await extractText(pdf, { mergePages: true }));
+  } else if (kind === "docx") {
+    const result = await mammoth.extractRawText({ buffer: Buffer.from(bytes) });
+    text = result.value;
+  } else {
+    text = Buffer.from(bytes).toString("utf-8");
+  }
   if (!text.trim()) {
-    throw new Error("PDF produced no extractable text (scanned image, not text-layer PDF?)");
+    throw new Error(`${kind.toUpperCase()} produced no extractable text (empty file, or a scanned/image-only PDF)`);
   }
   return text;
 }
@@ -68,8 +91,9 @@ export async function extractResumeFacts(text: string): Promise<ResumeFacts> {
 
 export async function parseResume(
   bytes: Uint8Array,
+  kind: ResumeFileKind,
 ): Promise<{ text: string; facts: ResumeFacts }> {
-  const text = await extractResumeText(bytes);
+  const text = await extractResumeText(bytes, kind);
   const facts = await extractResumeFacts(text);
   return { text, facts };
 }

@@ -20,6 +20,16 @@ export interface GithubProfile {
 
 const GITHUB_API = "https://api.github.com";
 
+// Accepts a bare username ("iamsiddhesh-dev"), an "@handle", or a full
+// profile URL ("https://github.com/iamsiddhesh-dev", "github.com/iamsiddhesh-dev/") —
+// the chat shouldn't force the user to know which form to paste.
+export function parseGithubUsername(input: string): string {
+  const trimmed = input.trim();
+  const urlMatch = trimmed.match(/github\.com\/([A-Za-z0-9-]+)/i);
+  if (urlMatch) return urlMatch[1];
+  return trimmed.replace(/^@/, "");
+}
+
 function authHeaders(): Record<string, string> {
   const token = process.env.GITHUB_TOKEN;
   return {
