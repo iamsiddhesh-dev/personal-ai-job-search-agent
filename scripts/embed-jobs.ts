@@ -73,9 +73,24 @@ async function main() {
   }[];
 
   let done = 0;
+  let quotaReached = false;
   for (let i = 0; i < rows.length; i += BATCH) {
     const batch = rows.slice(i, i + BATCH);
-    const vecs = await embedTexts(batch.map(jobEmbeddingText));
+    let vecs: number[][];
+    try {
+      vecs = await embedTexts(batch.map(jobEmbeddingText));
+    } catch (err) {
+      // The Gemini free embedding tier is 1,000/day. When it's exhausted this
+      // is NOT a failure — it's expected; stop cleanly and let a run after the
+      // daily reset (the 6-hourly schedule) pick up the rest. Exit 0 so the
+      // Action shows green, not a scary red X.
+      const msg = err instanceof Error ? err.message : String(err);
+      if (/429|quota|RESOURCE_EXHAUSTED/i.test(msg)) {
+        quotaReached = true;
+        break;
+      }
+      throw err;
+    }
     for (let k = 0; k < batch.length; k++) {
       await db.update(jobs).set({ embedding: vecs[k] }).where(eq(jobs.id, batch[k].jobId));
     }
@@ -95,7 +110,11 @@ async function main() {
     .select({ left: sql<number>`count(*)::int` })
     .from(jobs)
     .where(and(eq(jobs.isActive, true), isNull(jobs.embedding)));
-  console.log(`done. ${done} embedded this run; ${left} still remaining.`);
+  if (quotaReached) {
+    console.log(`daily embedding quota reached — ${done} embedded this run; ${left} remaining, resumes after the quota resets.`);
+  } else {
+    console.log(`done. ${done} embedded this run; ${left} still remaining.`);
+  }
   process.exit(0);
 }
 

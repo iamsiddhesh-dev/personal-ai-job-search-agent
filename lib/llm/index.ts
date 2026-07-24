@@ -61,6 +61,10 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 function retryDelayMs(err: unknown): number | null {
   const msg = err instanceof Error ? err.message : String(err);
   if (!looksLikeQuotaOrServerError(err)) return null;
+  // A PerDay cap won't clear in the ~60s the server (misleadingly) suggests — it
+  // resets at midnight PT. Retrying is pointless; give up so the run exits and a
+  // later day resumes. Only PerMinute caps are worth waiting out.
+  if (/PerDay|RequestsPerDay/i.test(msg)) return null;
   const m = msg.match(/retry in ([\d.]+)s/i) ?? msg.match(/retryDelay["\s:]+([\d.]+)s/i);
   const secs = m ? Number(m[1]) : 60;
   return Math.ceil(secs + 3) * 1000; // small buffer past the server's window
