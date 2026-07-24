@@ -1,31 +1,31 @@
 // Phase 3 — the matching engine. Highest-leverage file in the system
 // (REVISED-PLAN.md §8, §9): every result the user ever sees inherits its
-// quality from here. Three stages, in order:
+// quality from here.
 //
+// Stages, in order:
 //   1. Rule filter (SQL)  — role keywords, location/remote, team-size bucket,
-//        is_active, exclude already-seen. Thousands -> a few hundred.
-//   1b. Lexical pre-rank  — free token overlap of profile terms vs each job's
-//        title+description, keep the top ~180. This is the cost guard §5 in
-//        practice: the Gemini free-tier embedding quota is only ~100 req/min
-//        (each text counts), so we never embed the whole rule-filtered pool —
-//        we embed only the most lexically-promising slice of it.
+//        is_active, exclude already-seen, AND a seniority/years gate so a
+//        fresher is never shown "6+ years / Senior / Staff" roles (title
+//        exclusion here; the JD "N+ years" parse is applied just after).
 //   2. Vector rank (JS)   — cosine similarity, profile embedding vs each
-//        candidate's job embedding -> top ~60. Backfills job embeddings the
-//        first time a job is seen (only newly-seen jobs on later runs, stored
-//        so re-runs are free), paced to respect the per-minute quota.
+//        candidate's PRE-COMPUTED job embedding -> top ~60. This stage NEVER
+//        embeds at request time: job embeddings are backfilled offline by the
+//        harvester (scripts/embed-jobs.ts), so a live search reads vectors and
+//        waits on nothing. Using the same premium Gemini model offline means
+//        zero quality loss and seconds, not minutes, of latency.
 //   3. LLM re-rank        — Gemini Flash scores those ~60 on product<->project
-//        overlap, early-career friendliness, requirement match, hiring-signal
-//        strength and (critically for an India-based user, §12) location
-//        feasibility -> returns 20-25 with lead_project / gaps / rationale.
+//        overlap, requirement/seniority match, India location feasibility and
+//        hiring-signal strength -> returns 20-25 with lead_project/gaps/rationale.
+//   4. Link liveness      — HEAD-check the final apply URLs and drop any that
+//        have gone dead since the last harvest (catches same-day closures).
 //
-// All LLM/embedding traffic goes through lib/llm (the one choke point), never
-// a second path.
+// All LLM/embedding traffic goes through lib/llm (the one choke point).
 
 import { db } from "@/lib/db";
 import { jobs, companies } from "@/db/schema";
 import { and, eq, or, ilike, sql, notInArray, type SQL } from "drizzle-orm";
-import { embedTexts, extractStructured } from "@/lib/llm";
-import { mapLimit } from "@/lib/sources/http";
+import { extractStructured } from "@/lib/llm";
+import { mapLimit, UA } from "@/lib/sources/http";
 import { z } from "zod";
 
 // ---------------------------------------------------------------------------
@@ -45,6 +45,10 @@ export interface MatchProject {
 export interface MatchProfile {
   name: string | null;
   seniority: string | null;
+  // Relevant professional/technical years, as a NUMBER (0 for a fresher / new
+  // grad). This is what gates out senior, high-YOE roles — GitHub can't measure
+  // it, so it comes from the resume/LinkedIn, defaulting to 0 when unknown.
+  yearsExperience: number;
   location: string | null;
   skills: string[];
   projects: MatchProject[];
@@ -59,10 +63,16 @@ export interface MatchOptions {
   locationPref: LocationPref;
   teamSizeBucket?: TeamSizeBucket;
   excludeJobIds?: string[]; // already-applied jobs (Phase 5 wires the tracker in)
-  candidateCap?: number; // rule-filter ceiling; default 1000
-  embedCap?: number; // max jobs to embed per run (quota guard); default 180
+  // Seniority gate. Defaults are derived from the candidate's yearsExperience,
+  // but the chat can override them (e.g. a user deliberately targeting a stretch
+  // level). maxYearsRequired = the most years a role may demand and still be
+  // shown; dropSeniorTitles = exclude Senior/Staff/Lead/… titles outright.
+  maxYearsRequired?: number;
+  dropSeniorTitles?: boolean;
+  candidateCap?: number; // ranking-pool ceiling; default 1500
   vectorTopK?: number; // hand-off size to the LLM; default 60
   finalLimit?: number; // final results; default 25
+  verifyLinks?: boolean; // live-check the final apply URLs; default true
   log?: (msg: string) => void;
 }
 
@@ -165,6 +175,11 @@ function roleKeywords(roleFocus: string): string[] {
   return [key, "software engineer", "software developer", "engineer"];
 }
 
+// Titles that signal a role above an early-career candidate. Word-boundary
+// matched so "sr" won't hit "SRE", "lead" won't hit "leadership", etc.
+const SENIOR_TITLE_RX =
+  "\\y(senior|sr|staff|principal|lead|director|head|vp|architect|distinguished|manager|mgr|iii|iv)\\y";
+
 // Free-text locations are messy ("San Francisco, CA", "Remote - USA",
 // "World Wide - Remote", "Bengaluru"). Matching is done with Postgres ~* on the
 // raw location string plus the is_remote flag.
@@ -220,7 +235,7 @@ interface Candidate {
   ycBatch: string | null;
 }
 
-async function ruleFilter(opts: MatchOptions): Promise<Candidate[]> {
+async function ruleFilter(opts: MatchOptions, dropSeniorTitles: boolean): Promise<Candidate[]> {
   const kws = roleKeywords(opts.roleFocus);
   const roleCond = or(...kws.map((k) => ilike(jobs.title, `%${k}%`)));
 
@@ -230,6 +245,9 @@ async function ruleFilter(opts: MatchOptions): Promise<Candidate[]> {
     locationCondition(opts.locationPref),
     teamSizeCondition(opts.teamSizeBucket),
   ];
+  if (dropSeniorTitles) {
+    conds.push(sql`${jobs.title} !~* '${sql.raw(SENIOR_TITLE_RX)}'`);
+  }
   if (opts.excludeJobIds && opts.excludeJobIds.length > 0) {
     conds.push(notInArray(jobs.id, opts.excludeJobIds));
   }
@@ -255,69 +273,33 @@ async function ruleFilter(opts: MatchOptions): Promise<Candidate[]> {
     .where(and(...conds.filter((c): c is SQL => c !== undefined)))
     // Prefer fresh roles when the cap bites.
     .orderBy(sql`${jobs.postedAt} desc nulls last`, sql`${jobs.lastSeenAt} desc`)
-    .limit(opts.candidateCap ?? 1000) as Promise<Candidate[]>;
+    .limit(opts.candidateCap ?? 1500) as Promise<Candidate[]>;
 }
 
-// ---------------------------------------------------------------------------
-// Stage 1b — lexical pre-rank (free; bounds how much we embed)
-// ---------------------------------------------------------------------------
-
-const STOPWORDS = new Set([
-  "the", "and", "for", "with", "you", "your", "our", "are", "will", "have", "this",
-  "that", "from", "was", "were", "job", "role", "team", "work", "working", "engineer",
-  "engineering", "software", "developer", "development", "experience", "years",
-]);
-
-function terms(s: string): string[] {
-  return s
-    .toLowerCase()
-    .replace(/[^a-z0-9+#. ]/g, " ")
-    .split(/\s+/)
-    .filter((t) => t.length >= 3 && !STOPWORDS.has(t));
-}
-
-// A weighted bag of the candidate's distinguishing terms: skills, project names
-// + tech + descriptions. Used only to decide which rule-filtered jobs are worth
-// spending an embedding on — the real semantic ranking is stage 2.
-function profileTerms(profile: MatchProfile): Map<string, number> {
-  const bag = new Map<string, number>();
-  const add = (s: string, w: number) => {
-    for (const t of terms(s)) bag.set(t, (bag.get(t) ?? 0) + w);
-  };
-  for (const s of profile.skills) add(s, 3);
-  for (const p of profile.projects) {
-    add(p.name, 3);
-    add(p.technologies.join(" "), 2);
-    add(p.description, 1);
-  }
-  add(profile.summaryText, 1);
-  return bag;
-}
-
-function lexicalPrefilter(
-  profile: MatchProfile,
-  candidates: Candidate[],
-  keep: number,
-): Candidate[] {
-  if (candidates.length <= keep) return candidates;
-  const bag = profileTerms(profile);
-  const scored = candidates.map((c, i) => {
-    const title = new Set(terms(c.title));
-    const desc = new Set(c.description ? terms(stripHtml(c.description)) : []);
-    let score = 0;
-    for (const [term, w] of bag) {
-      if (title.has(term)) score += w * 3; // a term hit in the title is worth 3x a body hit
-      else if (desc.has(term)) score += w;
+// Parse the strictest "N years (of) experience" requirement out of a JD. Returns
+// the required minimum years, or null if the JD states none. Only counts a
+// number when it sits next to experience-ish context, so "founded 6 years ago"
+// or "10 years of combined team experience" don't masquerade as a requirement.
+export function requiredYears(description: string | null): number | null {
+  if (!description) return null;
+  const text = stripHtml(description).toLowerCase();
+  let max: number | null = null;
+  const re = /(\d{1,2})\s*\+?\s*(?:-\s*\d{1,2}\s*)?years?/g;
+  for (const m of text.matchAll(re)) {
+    const n = Number(m[1]);
+    if (n < 1 || n > 20) continue;
+    const idx = m.index ?? 0;
+    const ctx = text.slice(Math.max(0, idx - 45), idx + m[0].length + 25);
+    if (/experience|background|professional|industry|track record|hands-on|yoe/.test(ctx)) {
+      max = Math.max(max ?? 0, n);
     }
-    return { c, score, i };
-  });
-  // Sort by lexical score; ties fall back to the SQL order (recency).
-  scored.sort((a, b) => b.score - a.score || a.i - b.i);
-  return scored.slice(0, keep).map((s) => s.c);
+  }
+  return max;
 }
 
 // ---------------------------------------------------------------------------
-// Stage 2 — vector rank
+// Shared text / vector helpers (jobEmbeddingText is exported so the offline
+// backfill script builds byte-identical embedding input — no drift).
 // ---------------------------------------------------------------------------
 
 function stripHtml(s: string): string {
@@ -346,9 +328,15 @@ function toVec(v: unknown): number[] | null {
   return null;
 }
 
-function jobEmbeddingText(c: Candidate): string {
-  const desc = c.description ? stripHtml(c.description).slice(0, 2000) : "";
-  return `${c.title}\n${c.companyName} — ${c.location ?? "location n/a"} — team ${c.teamSize ?? "?"}\n${desc}`;
+export function jobEmbeddingText(j: {
+  title: string;
+  companyName: string;
+  location: string | null;
+  teamSize: number | null;
+  description: string | null;
+}): string {
+  const desc = j.description ? stripHtml(j.description).slice(0, 2000) : "";
+  return `${j.title}\n${j.companyName} — ${j.location ?? "location n/a"} — team ${j.teamSize ?? "?"}\n${desc}`;
 }
 
 function cosine(a: number[], b: number[]): number {
@@ -365,62 +353,34 @@ function cosine(a: number[], b: number[]): number {
   return dot / (Math.sqrt(na) * Math.sqrt(nb));
 }
 
-// Gemini free-tier embedding quota is ~100 embed_content units per rolling
-// minute and each text in a batchEmbedContents call is one unit. Keep each
-// batch comfortably under the cap (leaving headroom for units still aging out
-// of the window from a prior batch) and wait a full minute between batches.
-// embedTexts itself retries on a 429 as a safety net, but steady-state pacing
-// should avoid hitting it at all. This backfill is paid once per job, ever.
-const EMBED_BATCH = 45;
-const EMBED_PAUSE_MS = 61_000;
-
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+// ---------------------------------------------------------------------------
+// Stage 2 — vector rank (reads pre-computed embeddings; never embeds here)
+// ---------------------------------------------------------------------------
 
 interface Ranked {
   cand: Candidate;
-  vec: number[];
   vectorScore: number;
 }
 
-async function vectorRank(
+function vectorRank(
   profileEmbedding: number[],
   candidates: Candidate[],
   topK: number,
   log: (m: string) => void,
-): Promise<Ranked[]> {
-  // Split into "already embedded" vs "needs embedding" (first time we've seen
-  // this job). Store freshly-computed embeddings back so future runs skip them.
-  const withVec: { cand: Candidate; vec: number[] }[] = [];
-  const missing: Candidate[] = [];
+): Ranked[] {
+  const ranked: Ranked[] = [];
+  let notEmbedded = 0;
   for (const c of candidates) {
     const vec = toVec(c.embedding);
-    if (vec && vec.length > 0) withVec.push({ cand: c, vec });
-    else missing.push(c);
-  }
-  log(`  ${withVec.length} candidates already embedded, ${missing.length} to embed`);
-
-  for (let i = 0; i < missing.length; i += EMBED_BATCH) {
-    const batch = missing.slice(i, i + EMBED_BATCH);
-    const vecs = await embedTexts(batch.map(jobEmbeddingText));
-    // Persist back to jobs.embedding so this cost is paid once per job, ever.
-    await mapLimit(batch, 8, async (c, idx) => {
-      const vec = vecs[idx];
-      withVec.push({ cand: c, vec });
-      await db.update(jobs).set({ embedding: vec }).where(eq(jobs.id, c.jobId));
-    });
-    const done = Math.min(i + EMBED_BATCH, missing.length);
-    log(`  embedded ${done}/${missing.length}`);
-    if (done < missing.length) {
-      log(`  pausing ${EMBED_PAUSE_MS / 1000}s for embedding rate limit…`);
-      await sleep(EMBED_PAUSE_MS);
+    if (!vec || vec.length === 0) {
+      notEmbedded++;
+      continue;
     }
+    ranked.push({ cand: c, vectorScore: cosine(profileEmbedding, vec) });
   }
-
-  const ranked: Ranked[] = withVec.map(({ cand, vec }) => ({
-    cand,
-    vec,
-    vectorScore: cosine(profileEmbedding, vec),
-  }));
+  if (notEmbedded > 0) {
+    log(`  ${notEmbedded} candidate(s) not yet embedded — skipped (offline backfill covers them)`);
+  }
   ranked.sort((a, b) => b.vectorScore - a.vectorScore);
   return ranked.slice(0, topK);
 }
@@ -459,6 +419,7 @@ function profileBlock(profile: MatchProfile): string {
   return [
     `Name: ${profile.name ?? "unknown"}`,
     `Based in: ${profile.location ?? "India (assume India)"}`,
+    `Years of professional experience: ${profile.yearsExperience}`,
     `Seniority: ${profile.seniority ?? "unstated — treat as early-career"}`,
     `Skills: ${profile.skills.join(", ") || "n/a"}`,
     `Projects (proof of work):\n${projects || "  (none)"}`,
@@ -488,14 +449,13 @@ function rerankPrompt(profile: MatchProfile, ranked: Ranked[], finalLimit: numbe
 CANDIDATE
 ${profileBlock(profile)}
 
-OPEN ROLES (already pre-filtered by role, location and vector similarity; each is a real live posting from a company's own applicant-tracking system):
+OPEN ROLES (already pre-filtered by role, seniority, location and vector similarity; each is a real live posting from a company's own applicant-tracking system):
 ${jobsBlock(ranked)}
 
 TASK
 Score each role 0–100 on the weighted combination:
 - Product ↔ project overlap: does what this company builds line up with something the candidate has actually built? This matters most. Reward concrete overlap ("they're building onboarding, he built an Onboarding Copilot"), not vague topical similarity.
-- Early-career friendliness: the candidate is early-career. A role demanding 8+ years or a narrow senior specialty is a weak fit even if the domain matches.
-- Requirement match: how many of the role's stated requirements does the candidate plausibly meet?
+- Requirement & seniority match: the candidate has ${profile.yearsExperience} years of professional experience. A role clearly wanting significantly more experience, or a senior/staff specialty, is a weak fit even if the domain matches — score it low and say so in gaps. Do not reward roles the candidate is plainly under-qualified for.
 - Location feasibility for someone based in India: an onsite US/EU role is a poor fit unless it is genuinely remote-friendly to India. Reflect this in the score and call it out in gaps when relevant.
 - Hiring-signal strength: all of these are verified live openings, so use "verified"; only use "inferred" if you are truly guessing.
 
@@ -508,6 +468,42 @@ RULES
 }
 
 // ---------------------------------------------------------------------------
+// Stage 4 — apply-link liveness (drop same-day closures)
+// ---------------------------------------------------------------------------
+
+async function linkIsDead(url: string): Promise<boolean> {
+  const attempt = async (method: "HEAD" | "GET") => {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 7000);
+    try {
+      const res = await fetch(url, { method, redirect: "follow", headers: UA, signal: ctrl.signal });
+      return res.status;
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+  try {
+    let status = await attempt("HEAD");
+    if (status === 405 || status === 501) status = await attempt("GET"); // HEAD not allowed
+    // Only treat a definitive "gone" as dead. A transient network/5xx blip
+    // should not silently drop a real opening.
+    return status === 404 || status === 410;
+  } catch {
+    return false; // timeout / DNS hiccup — keep it rather than false-drop
+  }
+}
+
+async function verifyApplyLinks(matches: RankedMatch[], log: (m: string) => void): Promise<RankedMatch[]> {
+  const flags = await mapLimit(matches, 8, async (m) =>
+    m.applyUrl ? await linkIsDead(m.applyUrl) : false,
+  );
+  const kept = matches.filter((_, i) => !flags[i]);
+  const dropped = matches.length - kept.length;
+  if (dropped > 0) log(`  dropped ${dropped} result(s) with dead apply links`);
+  return kept;
+}
+
+// ---------------------------------------------------------------------------
 // Orchestrator
 // ---------------------------------------------------------------------------
 
@@ -516,19 +512,30 @@ export async function runMatch(profile: MatchProfile, opts: MatchOptions): Promi
   const finalLimit = opts.finalLimit ?? 25;
   const topK = opts.vectorTopK ?? 60;
 
+  // Seniority gate, derived from the candidate's years unless the caller overrode
+  // it. A 0-year fresher gets maxYears=2 (so "3+ years" roles are dropped) and
+  // senior-titled roles excluded outright.
+  const maxYears = opts.maxYearsRequired ?? Math.max(2, profile.yearsExperience + 1);
+  const dropSeniorTitles = opts.dropSeniorTitles ?? profile.yearsExperience <= 1;
+
   log("Stage 1 — rule filter");
-  const candidates = await ruleFilter(opts);
-  log(`  ${candidates.length} candidates after rule filter (role='${opts.roleFocus}', loc='${opts.locationPref}', team='${opts.teamSizeBucket ?? "any"}')`);
+  const raw = await ruleFilter(opts, dropSeniorTitles);
+  // JD "N+ years" gate (needs the description text, so it runs in JS here).
+  const candidates = raw.filter((c) => {
+    const req = requiredYears(c.description);
+    return req === null || req <= maxYears;
+  });
+  const yearsDropped = raw.length - candidates.length;
+  log(
+    `  ${candidates.length} candidates (role='${opts.roleFocus}', loc='${opts.locationPref}', team='${opts.teamSizeBucket ?? "any"}', maxYears=${maxYears}, seniorTitlesDropped=${dropSeniorTitles}; ${yearsDropped} dropped by JD years gate)`,
+  );
   if (candidates.length === 0) return [];
 
-  log("Stage 1b — lexical pre-rank");
-  const embedCap = opts.embedCap ?? 180;
-  const shortlist = lexicalPrefilter(profile, candidates, embedCap);
-  log(`  ${candidates.length} -> ${shortlist.length} to embed (cap ${embedCap})`);
-
   log("Stage 2 — vector rank");
-  const ranked = await vectorRank(profile.embedding, shortlist, topK, log);
-  log(`  top ${ranked.length} by cosine (best=${ranked[0]?.vectorScore.toFixed(3)}, worst=${ranked[ranked.length - 1]?.vectorScore.toFixed(3)})`);
+  const ranked = vectorRank(profile.embedding, candidates, topK, log);
+  log(
+    `  top ${ranked.length} by cosine (best=${ranked[0]?.vectorScore.toFixed(3) ?? "n/a"}, worst=${ranked[ranked.length - 1]?.vectorScore.toFixed(3) ?? "n/a"})`,
+  );
   if (ranked.length === 0) return [];
 
   log("Stage 3 — LLM re-rank");
@@ -541,7 +548,7 @@ export async function runMatch(profile: MatchProfile, opts: MatchOptions): Promi
   // Map the LLM's 1-based indices back onto the candidate rows, dropping any
   // out-of-range or duplicate index the model might hallucinate.
   const seen = new Set<number>();
-  const out: RankedMatch[] = [];
+  let out: RankedMatch[] = [];
   for (const m of matches) {
     const idx = m.jobIndex - 1;
     if (idx < 0 || idx >= ranked.length || seen.has(idx)) continue;
@@ -566,5 +573,11 @@ export async function runMatch(profile: MatchProfile, opts: MatchOptions): Promi
     });
   }
   out.sort((a, b) => b.score - a.score);
-  return out.slice(0, finalLimit);
+  out = out.slice(0, finalLimit);
+
+  if (opts.verifyLinks ?? true) {
+    log("Stage 4 — apply-link liveness check");
+    out = await verifyApplyLinks(out, log);
+  }
+  return out;
 }
