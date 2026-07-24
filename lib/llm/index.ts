@@ -66,7 +66,9 @@ export async function extractStructured<S extends ZodTypeAny>(params: {
 // comparable; both go through here.
 
 const VOYAGE_URL = "https://api.voyageai.com/v1/embeddings";
-const VOYAGE_MODEL = process.env.VOYAGE_MODEL ?? "voyage-4";
+// `||` not `??`: an empty-string env var (VOYAGE_MODEL= in .env) must still fall
+// back to the default, not send a blank model.
+const VOYAGE_MODEL = process.env.VOYAGE_MODEL || "voyage-4";
 const VOYAGE_DIM = 1024; // voyage-4 default; DB vector columns are vector(1024)
 const VOYAGE_BATCH = 128; // <= 1000 texts and well under the per-request token cap
 
