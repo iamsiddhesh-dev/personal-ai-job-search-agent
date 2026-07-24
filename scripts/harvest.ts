@@ -15,6 +15,7 @@ import { db } from "@/lib/db";
 import { companies, jobs } from "@/db/schema";
 import { eq, sql } from "drizzle-orm";
 import { fetchYcCompanies } from "@/lib/sources/yc";
+import { fetchSpeedrunCompanies } from "@/lib/sources/speedrun";
 import { acceleratorCompanies } from "@/lib/sources/accelerators";
 import { resolveAts } from "@/lib/sources/resolve-ats";
 import { fetchJobs as fetchAtsJobs } from "@/lib/sources/ats";
@@ -139,8 +140,11 @@ async function main() {
   const curated = acceleratorCompanies();
   console.log(`  + ${curated.length} curated accelerator companies`);
 
+  const speedrun = await fetchSpeedrunCompanies();
+  console.log(`  + ${speedrun.length} a16z Speedrun companies`);
+
   const active = yc.filter((c) => c.name && c.website);
-  const universe = [...active, ...curated];
+  const universe = [...active, ...curated, ...speedrun];
 
   console.log("\n=== 2. Upserting company universe ===");
   const companyIds = new Map<string, { id: string; company: SourceCompany }>();
