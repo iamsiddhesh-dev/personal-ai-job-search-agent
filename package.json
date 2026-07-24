@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "harvest": "node --env-file=.env node_modules/tsx/dist/cli.mjs scripts/harvest.ts"
   },
   "dependencies": {
     "@ai-sdk/google": "^4.0.22",
