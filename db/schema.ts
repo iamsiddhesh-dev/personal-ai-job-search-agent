@@ -34,7 +34,7 @@ export const profiles = pgTable("profiles", {
   skills: text("skills").array(),
   projects: jsonb("projects"),
   seniority: text("seniority"),
-  embedding: vector("embedding", { dimensions: 3072 }),
+  embedding: vector("embedding", { dimensions: 1024 }), // Voyage voyage-4 (was Gemini 3072)
 });
 
 export const companies = pgTable("companies", {
@@ -77,7 +77,7 @@ export const jobs = pgTable(
     lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull().defaultNow(),
     isActive: boolean("is_active").notNull().default(true),
 
-    embedding: vector("embedding", { dimensions: 3072 }),
+    embedding: vector("embedding", { dimensions: 1024 }), // Voyage voyage-4 (was Gemini 3072)
     raw: jsonb("raw"),
   },
   (table) => [unique().on(table.source, table.externalId)],

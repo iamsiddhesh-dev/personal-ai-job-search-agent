@@ -1,20 +1,16 @@
 // Offline job-embedding backfill. This is where embedding lives now — NOT in
-// the live match request. It runs in the harvester (GitHub Actions, unlimited
-// minutes), so a user search never waits on the embedding rate limit. Same
-// premium Gemini model as before => zero quality change, just moved off the
-// hot path.
+// the live match request. It runs in the harvester (GitHub Actions), so a user
+// search never waits on embedding. Uses Voyage AI (see lib/llm): a 200M free
+// token allowance and no daily cap, so the whole corpus warms in minutes.
 //
 // Idempotent/resumable: only touches jobs where embedding IS NULL, so it can be
-// re-run nightly and only ever embeds newly-harvested jobs. Paced to respect
-// the ~100-unit/min free-tier embedding quota (embedTexts also retries on 429).
+// re-run and only ever embeds newly-harvested jobs. embedTexts retries on 429.
 //
 // Run:  npm run embed-jobs
 // Env:  EMBED_MAX         cap jobs embedded this run (default: all NULL)
-//       EMBED_BATCH       texts per request (default 45; 90 hits the per-minute cap)
-//       EMBED_PAUSE       seconds between batches (default 61)
-//       EMBED_BUDGET_MIN  stop cleanly after N minutes (default: none). Used by
-//                         the GitHub Action to stay under GitHub's 6h job cap;
-//                         the run is idempotent so the next run resumes.
+//       EMBED_BATCH       texts per request (default 128; Voyage max 1000)
+//       EMBED_PAUSE       seconds between batches (default 1)
+//       EMBED_BUDGET_MIN  stop cleanly after N minutes (default: none)
 
 import { db } from "@/lib/db";
 import { jobs, companies } from "@/db/schema";
@@ -22,8 +18,8 @@ import { and, eq, isNull, sql } from "drizzle-orm";
 import { embedTexts } from "@/lib/llm";
 import { jobEmbeddingText } from "@/lib/agent/match";
 
-const BATCH = Number(process.env.EMBED_BATCH ?? 45);
-const PAUSE_MS = Number(process.env.EMBED_PAUSE ?? 61) * 1000;
+const BATCH = Number(process.env.EMBED_BATCH ?? 128);
+const PAUSE_MS = Number(process.env.EMBED_PAUSE ?? 1) * 1000;
 const MAX = process.env.EMBED_MAX ? Number(process.env.EMBED_MAX) : Infinity;
 const BUDGET_MS = process.env.EMBED_BUDGET_MIN ? Number(process.env.EMBED_BUDGET_MIN) * 60_000 : Infinity;
 const startedAt = Date.now();

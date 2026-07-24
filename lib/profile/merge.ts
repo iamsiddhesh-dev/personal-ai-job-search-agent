@@ -72,7 +72,9 @@ export async function mergeProfile(input: {
   if (portfolioUrl) summaryParts.push(`Portfolio: ${portfolioUrl}`);
 
   const embeddingSource = summaryParts.join("\n\n") || "empty profile";
-  const [embedding] = await embedTexts([embeddingSource]);
+  // The profile is matched AGAINST the job corpus, so embed it as a "query"
+  // (Voyage's asymmetric-retrieval guidance); jobs are embedded as "document".
+  const [embedding] = await embedTexts([embeddingSource], "query");
 
   const playback = buildPlayback({ name, skills: [...skills], projects, resumeFacts, github });
 

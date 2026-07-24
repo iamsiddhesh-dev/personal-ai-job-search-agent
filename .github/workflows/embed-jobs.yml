@@ -9,9 +9,8 @@
 # under GitHub's 6-hour job cap; the next run finishes any remainder.
 #
 # Required repo secrets (Settings → Secrets and variables → Actions):
-#   DATABASE_URL   (Supabase transaction-pooler URI)
-#   GEMINI_API_KEY
-#   GROQ_API_KEY   (optional; embedding doesn't use it, harmless to include)
+#   DATABASE_URL     (Supabase transaction-pooler URI)
+#   VOYAGE_API_KEY   (embeddings provider — voyageai.com)
 
 name: embed-jobs
 
@@ -35,12 +34,11 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - name: Embed jobs (paced, time-budgeted)
+      - name: Embed jobs (Voyage)
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
-          EMBED_BATCH: "45"
-          EMBED_PAUSE: "61"
+          VOYAGE_API_KEY: ${{ secrets.VOYAGE_API_KEY }}
+          EMBED_BATCH: "128"
+          EMBED_PAUSE: "1"
           EMBED_BUDGET_MIN: "320"
         run: npm run embed-jobs:ci
