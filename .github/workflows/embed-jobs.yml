@@ -34,11 +34,15 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - name: Embed jobs (Voyage)
+      - name: Embed jobs (Voyage, free-tier paced)
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           VOYAGE_API_KEY: ${{ secrets.VOYAGE_API_KEY }}
-          EMBED_BATCH: "128"
-          EMBED_PAUSE: "1"
+          # Voyage free tier = 3 RPM / 10K TPM. Stay inside it: <=8K tokens per
+          # request, one request/minute. ~15-20 jobs/min; a 5h20m run does ~5-6k,
+          # so the ~15k corpus finishes across a few of the 6-hourly runs.
+          VOYAGE_TPM_BUDGET: "8000"
+          EMBED_BATCH: "64"
+          EMBED_PAUSE: "60"
           EMBED_BUDGET_MIN: "320"
         run: npm run embed-jobs:ci

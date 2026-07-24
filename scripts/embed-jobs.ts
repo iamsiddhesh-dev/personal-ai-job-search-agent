@@ -1,16 +1,25 @@
 // Offline job-embedding backfill. This is where embedding lives now — NOT in
-// the live match request. It runs in the harvester (GitHub Actions), so a user
-// search never waits on embedding. Uses Voyage AI (see lib/llm): a 200M free
-// token allowance and no daily cap, so the whole corpus warms in minutes.
+// the live match request. It runs in GitHub Actions, so a user search never
+// waits on embedding. Uses Voyage AI (see lib/llm).
 //
-// Idempotent/resumable: only touches jobs where embedding IS NULL, so it can be
-// re-run and only ever embeds newly-harvested jobs. embedTexts retries on 429.
+// Voyage's free (no-payment-method) tier is 3 requests/min and 10,000 tokens/min.
+// To stay comfortably INSIDE that without ever tripping it, this script:
+//   • packs each request up to a token budget well under 10K TPM (token-aware
+//     batching — a fixed job count would blow the limit on long descriptions), and
+//   • sends ONE request per minute (well under 3 RPM).
+// That's ~15-20 jobs/min → the full ~15k corpus warms in ~12-16h, unattended.
+// The India/remote engineering subset is embedded first (priority ordering), so
+// searches are useful within the first couple of hours.
+//
+// Idempotent/resumable: only touches jobs where embedding IS NULL, so each run
+// resumes where the last stopped and later runs pick up newly-harvested jobs.
 //
 // Run:  npm run embed-jobs
-// Env:  EMBED_MAX         cap jobs embedded this run (default: all NULL)
-//       EMBED_BATCH       texts per request (default 128; Voyage max 1000)
-//       EMBED_PAUSE       seconds between batches (default 1)
-//       EMBED_BUDGET_MIN  stop cleanly after N minutes (default: none)
+// Env:  EMBED_MAX          cap jobs embedded this run (default: all NULL)
+//       VOYAGE_TPM_BUDGET  max tokens per request (default 8000; keep < 10000)
+//       EMBED_BATCH        hard cap on texts per request (default 64)
+//       EMBED_PAUSE        seconds between requests (default 60; keeps us < 3 RPM)
+//       EMBED_BUDGET_MIN   stop cleanly after N minutes (Actions 6h-cap guard)
 
 import { db } from "@/lib/db";
 import { jobs, companies } from "@/db/schema";
@@ -18,12 +27,18 @@ import { and, eq, isNull, sql } from "drizzle-orm";
 import { embedTexts } from "@/lib/llm";
 import { jobEmbeddingText } from "@/lib/agent/match";
 
-const BATCH = Number(process.env.EMBED_BATCH ?? 128);
-const PAUSE_MS = Number(process.env.EMBED_PAUSE ?? 1) * 1000;
+const TPM_BUDGET = Number(process.env.VOYAGE_TPM_BUDGET ?? 8000);
+const MAX_BATCH = Number(process.env.EMBED_BATCH ?? 64);
+const PAUSE_MS = Number(process.env.EMBED_PAUSE ?? 60) * 1000;
 const MAX = process.env.EMBED_MAX ? Number(process.env.EMBED_MAX) : Infinity;
 const BUDGET_MS = process.env.EMBED_BUDGET_MIN ? Number(process.env.EMBED_BUDGET_MIN) * 60_000 : Infinity;
 const startedAt = Date.now();
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+// Rough token estimate (~4 chars/token for English) plus a small per-text
+// overhead. Only used to keep each request under the TPM budget — it's a ceiling
+// guard, so a slight overestimate is fine (and safer than an underestimate).
+const estTokens = (text: string) => Math.ceil(text.length / 4) + 8;
 
 async function main() {
   const [{ remaining }] = await db
@@ -37,7 +52,9 @@ async function main() {
     console.log("nothing to embed — corpus is fully warmed.");
     process.exit(0);
   }
-  console.log(`embedding up to ${limit} this run (batch ${BATCH}, pause ${PAUSE_MS / 1000}s)`);
+  console.log(
+    `embedding up to ${limit} this run (<= ${TPM_BUDGET} tok/req, <= ${MAX_BATCH} texts/req, 1 req / ${PAUSE_MS / 1000}s)`,
+  );
 
   // Priority: engineering-ish titles that are India/remote-relevant and recent
   // get embedded first, so searches are useful long before the whole corpus is
@@ -68,36 +85,49 @@ async function main() {
     teamSize: number | null;
   }[];
 
+  const items = rows.map((r) => ({ jobId: r.jobId, text: jobEmbeddingText(r) }));
+
   let done = 0;
-  let quotaReached = false;
-  for (let i = 0; i < rows.length; i += BATCH) {
-    const batch = rows.slice(i, i + BATCH);
+  let cursor = 0;
+  let rateLimited = false;
+  while (cursor < items.length) {
+    // Pack the next request up to the token budget (and the count cap).
+    const batch: { jobId: string; text: string }[] = [];
+    let tok = 0;
+    while (cursor < items.length && batch.length < MAX_BATCH) {
+      const t = estTokens(items[cursor].text);
+      if (batch.length > 0 && tok + t > TPM_BUDGET) break; // always send at least one
+      batch.push(items[cursor]);
+      tok += t;
+      cursor++;
+    }
+
     let vecs: number[][];
     try {
-      vecs = await embedTexts(batch.map(jobEmbeddingText));
+      vecs = await embedTexts(batch.map((b) => b.text));
     } catch (err) {
-      // The Gemini free embedding tier is 1,000/day. When it's exhausted this
-      // is NOT a failure — it's expected; stop cleanly and let a run after the
-      // daily reset (the 6-hourly schedule) pick up the rest. Exit 0 so the
-      // Action shows green, not a scary red X.
+      // A sustained rate-limit that outlived the client retries — stop cleanly
+      // (exit 0, green Action) and let the next scheduled run resume. With the
+      // pacing above this should not happen; it's a safety net.
       const msg = err instanceof Error ? err.message : String(err);
-      if (/429|quota|RESOURCE_EXHAUSTED/i.test(msg)) {
-        quotaReached = true;
+      if (/429|quota|rate.?limit|RESOURCE_EXHAUSTED/i.test(msg)) {
+        rateLimited = true;
         break;
       }
       throw err;
     }
+
     for (let k = 0; k < batch.length; k++) {
       await db.update(jobs).set({ embedding: vecs[k] }).where(eq(jobs.id, batch[k].jobId));
     }
     done += batch.length;
-    console.log(`  embedded ${done}/${rows.length}`);
-    if (done < rows.length) {
+    console.log(`  embedded ${done}/${items.length}  (this req: ${batch.length} jobs, ~${tok} tok)`);
+
+    if (cursor < items.length) {
       if (Date.now() - startedAt > BUDGET_MS) {
-        console.log(`  time budget reached — stopping cleanly (a later run resumes).`);
+        console.log("  time budget reached — stopping cleanly (a later run resumes).");
         break;
       }
-      console.log(`  pausing ${PAUSE_MS / 1000}s (embedding rate limit)…`);
       await sleep(PAUSE_MS);
     }
   }
@@ -106,8 +136,8 @@ async function main() {
     .select({ left: sql<number>`count(*)::int` })
     .from(jobs)
     .where(and(eq(jobs.isActive, true), isNull(jobs.embedding)));
-  if (quotaReached) {
-    console.log(`daily embedding quota reached — ${done} embedded this run; ${left} remaining, resumes after the quota resets.`);
+  if (rateLimited) {
+    console.log(`hit Voyage rate limit — ${done} embedded this run; ${left} remaining, resumes next run.`);
   } else {
     console.log(`done. ${done} embedded this run; ${left} still remaining.`);
   }
