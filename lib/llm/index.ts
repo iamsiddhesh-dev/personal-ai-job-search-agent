@@ -51,13 +51,36 @@ export async function extractStructured<S extends ZodTypeAny>(params: {
   }
 }
 
-// Batch embeddings for profile/job vectors. Gemini's embedding model has its
-// own daily quota (1,500 req/day) separate from Flash's; batch multiple texts
-// per call rather than one call per text.
+// Batch embeddings for profile/job vectors. Gemini's embedding model has a
+// tight free-tier limit (~100 embed_content units per minute, and each text
+// counts) with no Groq fallback available — Groq has no embedding endpoint. So
+// unlike extractStructured, the only correct response to a 429 here is to wait
+// out the window the server tells us to and retry, not to fail the run.
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+function retryDelayMs(err: unknown): number | null {
+  const msg = err instanceof Error ? err.message : String(err);
+  if (!looksLikeQuotaOrServerError(err)) return null;
+  const m = msg.match(/retry in ([\d.]+)s/i) ?? msg.match(/retryDelay["\s:]+([\d.]+)s/i);
+  const secs = m ? Number(m[1]) : 60;
+  return Math.ceil(secs + 3) * 1000; // small buffer past the server's window
+}
+
 export async function embedTexts(texts: string[]): Promise<number[][]> {
-  const { embeddings } = await embedMany({
-    model: google.embedding(EMBEDDING_MODEL),
-    values: texts,
-  });
-  return embeddings;
+  const maxRetries = 6;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const { embeddings } = await embedMany({
+        model: google.embedding(EMBEDDING_MODEL),
+        values: texts,
+        maxParallelCalls: 1, // don't burst parallel sub-requests into the per-minute cap
+        maxRetries: 0, // we own the retry loop so we can honor the server's retryDelay
+      });
+      return embeddings;
+    } catch (err) {
+      const wait = retryDelayMs(err);
+      if (wait === null || attempt >= maxRetries) throw err;
+      await sleep(wait);
+    }
+  }
 }
