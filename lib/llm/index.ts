@@ -66,6 +66,12 @@ function retryDelayMs(err: unknown): number | null {
   return Math.ceil(secs + 3) * 1000; // small buffer past the server's window
 }
 
+// A per-minute 429 asks us to wait ~30-60s — worth sleeping through. A daily-cap
+// 429 asks us to wait until midnight PT (hours) — NOT worth hanging a process on;
+// throw instead so the caller (backfill loop / Actions job) exits cleanly and a
+// later scheduled run resumes. This threshold is what separates the two.
+const MAX_EMBED_WAIT_MS = 150_000;
+
 export async function embedTexts(texts: string[]): Promise<number[][]> {
   const maxRetries = 6;
   for (let attempt = 0; ; attempt++) {
@@ -79,7 +85,7 @@ export async function embedTexts(texts: string[]): Promise<number[][]> {
       return embeddings;
     } catch (err) {
       const wait = retryDelayMs(err);
-      if (wait === null || attempt >= maxRetries) throw err;
+      if (wait === null || attempt >= maxRetries || wait > MAX_EMBED_WAIT_MS) throw err;
       await sleep(wait);
     }
   }

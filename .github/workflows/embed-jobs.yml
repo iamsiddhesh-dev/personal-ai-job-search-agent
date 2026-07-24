@@ -1,0 +1,46 @@
+# Offline job-embedding backfill in the cloud (free, unlimited minutes on a
+# public repo). This warms jobs.embedding so live searches never wait on the
+# embedding rate limit. Same premium Gemini model as the app — just off the
+# hot path. The script is idempotent (only touches embedding IS NULL rows), so
+# each run resumes where the last left off and also embeds newly-harvested jobs.
+#
+# Trigger: "Run workflow" (workflow_dispatch) to start now, plus a schedule that
+# resumes/maintains automatically. Each run is bounded to ~5h20m so it stays
+# under GitHub's 6-hour job cap; the next run finishes any remainder.
+#
+# Required repo secrets (Settings → Secrets and variables → Actions):
+#   DATABASE_URL   (Supabase transaction-pooler URI)
+#   GEMINI_API_KEY
+#   GROQ_API_KEY   (optional; embedding doesn't use it, harmless to include)
+
+name: embed-jobs
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 */6 * * *" # every 6 hours: finish the backfill, then keep new jobs warm
+
+concurrency:
+  group: embed-jobs
+  cancel-in-progress: false # never run two backfills at once — they share the quota
+
+jobs:
+  embed:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Embed jobs (paced, time-budgeted)
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          EMBED_BATCH: "45"
+          EMBED_PAUSE: "61"
+          EMBED_BUDGET_MIN: "320"
+        run: npm run embed-jobs:ci

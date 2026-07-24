@@ -9,9 +9,12 @@
 // the ~100-unit/min free-tier embedding quota (embedTexts also retries on 429).
 //
 // Run:  npm run embed-jobs
-// Env:  EMBED_MAX    cap jobs embedded this run (default: all NULL)
-//       EMBED_BATCH  texts per request (default 45; keep < ~90)
-//       EMBED_PAUSE  seconds between batches (default 61)
+// Env:  EMBED_MAX         cap jobs embedded this run (default: all NULL)
+//       EMBED_BATCH       texts per request (default 45; 90 hits the per-minute cap)
+//       EMBED_PAUSE       seconds between batches (default 61)
+//       EMBED_BUDGET_MIN  stop cleanly after N minutes (default: none). Used by
+//                         the GitHub Action to stay under GitHub's 6h job cap;
+//                         the run is idempotent so the next run resumes.
 
 import { db } from "@/lib/db";
 import { jobs, companies } from "@/db/schema";
@@ -22,6 +25,8 @@ import { jobEmbeddingText } from "@/lib/agent/match";
 const BATCH = Number(process.env.EMBED_BATCH ?? 45);
 const PAUSE_MS = Number(process.env.EMBED_PAUSE ?? 61) * 1000;
 const MAX = process.env.EMBED_MAX ? Number(process.env.EMBED_MAX) : Infinity;
+const BUDGET_MS = process.env.EMBED_BUDGET_MIN ? Number(process.env.EMBED_BUDGET_MIN) * 60_000 : Infinity;
+const startedAt = Date.now();
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 async function main() {
@@ -77,6 +82,10 @@ async function main() {
     done += batch.length;
     console.log(`  embedded ${done}/${rows.length}`);
     if (done < rows.length) {
+      if (Date.now() - startedAt > BUDGET_MS) {
+        console.log(`  time budget reached — stopping cleanly (a later run resumes).`);
+        break;
+      }
       console.log(`  pausing ${PAUSE_MS / 1000}s (embedding rate limit)…`);
       await sleep(PAUSE_MS);
     }
