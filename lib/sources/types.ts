@@ -31,7 +31,7 @@ export interface SourceCompany {
   name: string;
   slug: string | null;
   website: string | null;
-  source: "yc" | "curated";
+  source: "yc" | "curated" | "speedrun";
   ycBatch: string | null;
   teamSize: number | null;
   industries: string[];
