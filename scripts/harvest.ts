@@ -13,7 +13,7 @@
 
 import { db } from "@/lib/db";
 import { companies, jobs } from "@/db/schema";
-import { eq, sql } from "drizzle-orm";
+import { and, eq, notInArray, sql } from "drizzle-orm";
 import { fetchYcCompanies } from "@/lib/sources/yc";
 import { fetchSpeedrunCompanies } from "@/lib/sources/speedrun";
 import { acceleratorCompanies } from "@/lib/sources/accelerators";
@@ -132,6 +132,32 @@ async function upsertJobs(companyId: string, normalized: NormalizedJob[]) {
   return count;
 }
 
+// After a fresh pull of a company's ATS board, any job we previously stored for
+// that company+source that is no longer on the board has been filled/closed —
+// flip it to isActive=false so matching (which only queries isActive) stops
+// surfacing it. Without this a job stays "active" forever once first seen.
+async function markClosedJobs(
+  companyId: string,
+  source: string,
+  seenExternalIds: string[],
+): Promise<number> {
+  const base = and(
+    eq(jobs.companyId, companyId),
+    eq(jobs.source, source),
+    eq(jobs.isActive, true),
+  );
+  const where =
+    seenExternalIds.length > 0
+      ? and(base, notInArray(jobs.externalId, seenExternalIds))
+      : base; // board is now empty → close everything we had for it
+  const closed = await db
+    .update(jobs)
+    .set({ isActive: false })
+    .where(where)
+    .returning({ id: jobs.id });
+  return closed.length;
+}
+
 async function main() {
   console.log("=== 1. YC company universe ===");
   const yc = await fetchYcCompanies({ maxPages: MAX_PAGES });
@@ -165,6 +191,7 @@ async function main() {
 
   let resolved = 0;
   let jobsWritten = 0;
+  let jobsClosed = 0;
   let done = 0;
   await mapLimit(candidates, CONCURRENCY, async ({ id, company }) => {
     try {
@@ -182,6 +209,13 @@ async function main() {
       resolved++;
       const n = await upsertJobs(id, normalized);
       jobsWritten += n;
+      // Reconcile: close any of this company's jobs (same ATS source) that are
+      // no longer on the freshly-fetched board.
+      jobsClosed += await markClosedJobs(
+        id,
+        hit.type,
+        normalized.map((j) => j.externalId),
+      );
     } catch (err) {
       await markAtsStatus(id, "error");
       console.error(`  error resolving ${company.name}:`, err);
@@ -192,6 +226,7 @@ async function main() {
   });
   console.log(`  ATS resolved: ${resolved}/${candidates.length}`);
   console.log(`  jobs written (ATS): ${jobsWritten}`);
+  console.log(`  jobs closed (gone from board): ${jobsClosed}`);
 
   console.log("\n=== 4. Himalayas feed (supplement) ===");
   const himalayasEntries = await fetchHimalayas(HIMALAYAS_PAGES);

@@ -37,11 +37,14 @@ async function main() {
   const { facts } = await parseResume(bytes, "pdf");
   const github = await fetchGithubProfile(GITHUB_HANDLE);
   const merged = await mergeProfile({ resumeFacts: facts, github });
-  console.log(`  name=${merged.name} seniority=${merged.seniority} skills=${merged.skills.length} projects=${merged.projects.length} embedding=${merged.embedding.length}d`);
+  console.log(
+    `  name=${merged.name} seniority=${merged.seniority} yoe=${facts.yearsOfExperience} skills=${merged.skills.length} projects=${merged.projects.length} embedding=${merged.embedding.length}d`,
+  );
 
   const profile: MatchProfile = {
     name: merged.name,
     seniority: merged.seniority,
+    yearsExperience: facts.yearsOfExperience,
     location: facts.location,
     skills: merged.skills,
     projects: merged.projects,

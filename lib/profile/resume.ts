@@ -29,6 +29,11 @@ export const resumeFactsSchema = z.object({
     .string()
     .nullable()
     .describe("e.g. 'entry-level', 'junior', 'mid'; null if not inferable"),
+  yearsOfExperience: z
+    .number()
+    .describe(
+      "Years of RELEVANT professional/technical (software/engineering) experience, as a number. A student or new grad with only internships/projects is 0. Count full-time/professional roles only; do NOT count unrelated freelance (e.g. video editing) toward this number, and do NOT count academic projects. If unclear, use 0.",
+    ),
   skills: z.array(z.string()),
   projects: z.array(
     z.object({
@@ -77,7 +82,8 @@ function buildExtractionPrompt(text: string): string {
 - Only report what is explicitly stated in the text below. Never infer, guess, or embellish.
 - If a field is genuinely absent or ambiguous, use null (for scalar fields) or an empty array — do not invent a plausible-sounding value.
 - For "seniority", base it only on years of experience or titles explicitly stated; if you cannot tell, use null.
-- Freelance or non-engineering work (e.g. video editing, graphic design) counts as real experience entries — include it, do not drop it or relabel it as something it isn't.
+- For "yearsOfExperience", give a NUMBER of years of relevant professional software/engineering work only. A new grad or student whose only software work is projects/internships is 0. Unrelated freelance (video editing, design) does NOT count toward this number.
+- Freelance or non-engineering work (e.g. video editing, graphic design) still counts as real experience ENTRIES — include it in the experience array, do not drop it or relabel it as something it isn't. (It just doesn't inflate yearsOfExperience.)
 
 Resume text:
 """
