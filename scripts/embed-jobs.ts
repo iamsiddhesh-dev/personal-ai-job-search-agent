@@ -102,20 +102,29 @@ async function main() {
       cursor++;
     }
 
-    let vecs: number[][];
-    try {
-      vecs = await embedTexts(batch.map((b) => b.text));
-    } catch (err) {
-      // A sustained rate-limit that outlived the client retries — stop cleanly
-      // (exit 0, green Action) and let the next scheduled run resume. With the
-      // pacing above this should not happen; it's a safety net.
-      const msg = err instanceof Error ? err.message : String(err);
-      if (/429|quota|rate.?limit|RESOURCE_EXHAUSTED/i.test(msg)) {
-        rateLimited = true;
+    // Embed this batch, tolerating rate limits: on a 429 (e.g. two runs landing
+    // back-to-back so a prior request is still inside the rolling minute), wait
+    // a full minute and retry the SAME batch rather than abandoning the run.
+    // Only give up after several minutes of persistent limiting (or the time
+    // budget), which the next scheduled run then resumes from.
+    let vecs: number[][] | null = null;
+    for (let attempt = 0; attempt <= 5; attempt++) {
+      try {
+        vecs = await embedTexts(batch.map((b) => b.text));
         break;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        const isRate = /429|quota|rate.?limit|RESOURCE_EXHAUSTED/i.test(msg);
+        if (!isRate) throw err;
+        if (attempt >= 5 || Date.now() - startedAt > BUDGET_MS) {
+          rateLimited = true;
+          break;
+        }
+        console.log(`  rate-limited — waiting 65s, then retrying this batch (attempt ${attempt + 1}/5)`);
+        await sleep(65_000);
       }
-      throw err;
     }
+    if (vecs === null) break; // gave up (persistent limit or over budget)
 
     for (let k = 0; k < batch.length; k++) {
       await db.update(jobs).set({ embedding: vecs[k] }).where(eq(jobs.id, batch[k].jobId));
