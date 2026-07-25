@@ -77,6 +77,10 @@ export interface MatchOptions {
 }
 
 export interface RankedMatch {
+  // Set by the /api/run route after it persists the run's `matches` rows, so a
+  // drafts request can point at a real matches.id (Phase 6). The matcher itself
+  // leaves this undefined — it doesn't persist anything.
+  matchId?: string | null;
   jobId: string;
   title: string;
   company: string;

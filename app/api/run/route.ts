@@ -5,6 +5,7 @@ import { runMatch, type LocationPref, type TeamSizeBucket } from "@/lib/agent/ma
 import { buildMatchProfileFromRow } from "@/lib/agent/build-profile";
 import { getOrCreateSingleUser } from "@/lib/user";
 import { getExcludedJobIds } from "@/lib/applications";
+import { persistRun } from "@/lib/agent/persist";
 
 interface RunRequest {
   profileId: string;
@@ -47,7 +48,23 @@ export async function POST(req: Request) {
           finalLimit: 25,
           log: (m) => send({ type: "status", message: m }),
         });
-        send({ type: "result", jobs: results });
+        // Persist the run + matches so each result carries a matches.id the
+        // outreach-drafts step (Phase 6) can reference. A persistence failure
+        // must not lose an otherwise-good result set, so fall back to the
+        // unpersisted results (drafts just won't be available for that run).
+        let jobs = results;
+        try {
+          jobs = await persistRun({
+            userId,
+            profileId,
+            roleFocus,
+            filters: { locationPref, teamSizeBucket: teamSizeBucket ?? "any" },
+            results,
+          });
+        } catch (err) {
+          send({ type: "status", message: `(note: couldn't save this run — drafts disabled for it: ${(err as Error).message})` });
+        }
+        send({ type: "result", jobs });
       } catch (err) {
         send({ type: "error", message: (err as Error).message });
       } finally {
