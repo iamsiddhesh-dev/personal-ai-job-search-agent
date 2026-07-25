@@ -106,7 +106,13 @@ export const matches = pgTable("matches", {
 export const applications = pgTable("applications", {
   id: uuid("id").primaryKey().defaultRandom(),
   userId: uuid("user_id").notNull().references(() => users.id),
-  jobId: uuid("job_id").notNull().references(() => jobs.id),
+  // Nullable: most rows come from a harvested job posting, but the imported
+  // xlsx tracker (REVISED-PLAN §8 Phase 5) has manually-tracked outreach
+  // targets with no matching row in `jobs` — companyName/roleTitle carry the
+  // display info for those instead.
+  jobId: uuid("job_id").references(() => jobs.id),
+  companyName: text("company_name"),
+  roleTitle: text("role_title"),
   status: text("status").notNull().default("applied"),
   appliedAt: timestamp("applied_at", { withTimezone: true }),
   nextFollowupAt: timestamp("next_followup_at", { withTimezone: true }),

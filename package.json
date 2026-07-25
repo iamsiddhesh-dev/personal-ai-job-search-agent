@@ -12,7 +12,10 @@
     "test:phase3": "node --env-file=.env node_modules/tsx/dist/cli.mjs scripts/test-phase3.ts",
     "embed-jobs": "node --env-file=.env node_modules/tsx/dist/cli.mjs scripts/embed-jobs.ts",
     "embed-jobs:ci": "node node_modules/tsx/dist/cli.mjs scripts/embed-jobs.ts",
-    "migrate:voyage": "node --env-file=.env node_modules/tsx/dist/cli.mjs scripts/migrate-to-voyage.ts"
+    "migrate:voyage": "node --env-file=.env node_modules/tsx/dist/cli.mjs scripts/migrate-to-voyage.ts",
+    "test:phase5": "node --env-file=.env node_modules/tsx/dist/cli.mjs scripts/test-phase5.ts",
+    "import-tracker": "node --env-file=.env node_modules/tsx/dist/cli.mjs scripts/import-tracker.ts",
+    "export-tracker": "node --env-file=.env node_modules/tsx/dist/cli.mjs scripts/export-tracker.ts"
   },
   "dependencies": {
     "@ai-sdk/google": "^4.0.22",
@@ -37,10 +40,12 @@
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
+    "@types/adm-zip": "^0.5.8",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "@types/three": "^0.185.1",
+    "adm-zip": "^0.6.0",
     "drizzle-kit": "^0.31.10",
     "eslint": "^9",
     "eslint-config-next": "16.2.11",
