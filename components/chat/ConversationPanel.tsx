@@ -8,6 +8,7 @@
 import { useEffect, useRef, useState } from "react";
 import ChatThread from "./ChatThread";
 import Composer from "./Composer";
+import FollowupsBanner from "./FollowupsBanner";
 import SourcesForm, { type SourcesSubmission } from "./SourcesForm";
 import type { ChatMessage, RankedMatch } from "./types";
 import {
@@ -212,6 +213,7 @@ export default function ConversationPanel() {
 
   return (
     <>
+      <FollowupsBanner />
       <ChatThread messages={messages} isTyping={isTyping} />
       {showSourcesForm && <SourcesForm onSubmit={handleSourcesSubmit} disabled={busy} />}
       <Composer
