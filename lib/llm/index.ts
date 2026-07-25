@@ -3,11 +3,11 @@
 // - CHAT / structured extraction / re-rank -> Gemini Flash, with a Groq
 //   fallback on a quota/5xx error (Google cut free quotas 50-80% in Dec 2025
 //   with no notice, see REVISED-PLAN.md §3).
-// - EMBEDDINGS -> Voyage AI. Gemini's free embedding tier is only 1,000/day,
-//   which can't warm a ~15k-job corpus in reasonable time; Voyage gives a 200M
-//   free-token allowance (no card) on the voyage-4 family at top-tier quality,
-//   embeds the whole corpus in minutes, and has no punishing daily cap. Groq
-//   has no embedding endpoint, so it is NOT an option here.
+// - EMBEDDINGS -> Cohere (embed-v4.0, 1024-dim). Gemini's free tier is 1,000/day
+//   and Voyage's no-card tier is 3 req/min (too fragile — any second consumer
+//   starves it). Cohere's free trial key needs no card and allows 2,000
+//   inputs/min, which warms the ~15k corpus in ~10min and tolerates concurrent
+//   use. Groq has no embedding endpoint, so it is NOT an option here.
 
 import { createGoogleGenerativeAI } from "@ai-sdk/google";
 import { createGroq } from "@ai-sdk/groq";
@@ -59,48 +59,50 @@ export async function extractStructured<S extends ZodTypeAny>(params: {
   }
 }
 
-// --- Embeddings (Voyage AI) --------------------------------------------------
-// Direct REST call — there is no official Vercel AI SDK Voyage provider, and the
-// API is a single POST, so a thin fetch client keeps the dependency surface
-// minimal. Profile and job embeddings MUST use the same model + dimension to be
-// comparable; both go through here.
+// --- Embeddings (Cohere) -----------------------------------------------------
+// Direct REST call (thin fetch client, no extra dependency). Cohere's free trial
+// key needs no payment method and allows 2,000 inputs/min — orders of magnitude
+// above Voyage's no-card 3 RPM, which was too fragile to warm the corpus while
+// anything else touched the key. embed-v4.0 at output_dimension 1024 matches our
+// vector(1024) columns. Profile and job embeddings MUST use the same model +
+// dimension to be comparable; both go through here.
+// Trial cap: 1,000 API calls/month — the full ~15k corpus is ~162 calls (96
+// texts each), so plenty of headroom for incremental re-runs + profile builds.
 
-const VOYAGE_URL = "https://api.voyageai.com/v1/embeddings";
-// `||` not `??`: an empty-string env var (VOYAGE_MODEL= in .env) must still fall
+const COHERE_URL = "https://api.cohere.com/v2/embed";
+// `||` not `??`: an empty-string env var (COHERE_MODEL= in .env) must still fall
 // back to the default, not send a blank model.
-const VOYAGE_MODEL = process.env.VOYAGE_MODEL || "voyage-4";
-const VOYAGE_DIM = 1024; // voyage-4 default; DB vector columns are vector(1024)
-const VOYAGE_BATCH = 128; // <= 1000 texts and well under the per-request token cap
+const COHERE_MODEL = process.env.COHERE_MODEL || "embed-v4.0";
+const COHERE_DIM = 1024;
+const COHERE_BATCH = 96; // Cohere's hard max texts per request
 
 type InputType = "query" | "document";
 
-interface VoyageResponse {
-  data: { index: number; embedding: number[] }[];
+interface CohereResponse {
+  embeddings: { float: number[][] };
 }
 
-async function voyageEmbedBatch(texts: string[], inputType: InputType): Promise<number[][]> {
+async function cohereEmbedBatch(texts: string[], inputType: InputType): Promise<number[][]> {
   const maxRetries = 6;
   for (let attempt = 0; ; attempt++) {
-    const res = await fetch(VOYAGE_URL, {
+    const res = await fetch(COHERE_URL, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${process.env.VOYAGE_API_KEY}`,
+        Authorization: `Bearer ${process.env.COHERE_API_KEY}`,
       },
       body: JSON.stringify({
-        model: VOYAGE_MODEL,
-        input: texts,
-        input_type: inputType,
-        output_dimension: VOYAGE_DIM,
+        model: COHERE_MODEL,
+        texts,
+        input_type: inputType === "query" ? "search_query" : "search_document",
+        output_dimension: COHERE_DIM,
+        embedding_types: ["float"],
       }),
     });
 
     if (res.ok) {
-      const json = (await res.json()) as VoyageResponse;
-      // Reorder by `index` — the API preserves order, but be defensive.
-      const out = new Array<number[]>(texts.length);
-      for (const d of json.data) out[d.index] = d.embedding;
-      return out;
+      const json = (await res.json()) as CohereResponse;
+      return json.embeddings.float;
     }
 
     // 429 (rate limit) / 5xx are transient — honor Retry-After, else backoff.
@@ -112,20 +114,20 @@ async function voyageEmbedBatch(texts: string[], inputType: InputType): Promise<
     }
 
     const body = await res.text().catch(() => "");
-    throw new Error(`Voyage embeddings ${res.status}: ${body.slice(0, 300)}`);
+    throw new Error(`Cohere embeddings ${res.status}: ${body.slice(0, 300)}`);
   }
 }
 
-// Embed a batch of texts. `inputType` follows Voyage's asymmetric-retrieval
-// guidance: the job corpus is "document", the profile (which we match against
-// the corpus) is "query".
+// Embed a batch of texts. `inputType` maps to Cohere's asymmetric-retrieval
+// types: the job corpus is "document" (search_document), the profile (which we
+// match against the corpus) is "query" (search_query).
 export async function embedTexts(
   texts: string[],
   inputType: InputType = "document",
 ): Promise<number[][]> {
   const out: number[][] = [];
-  for (let i = 0; i < texts.length; i += VOYAGE_BATCH) {
-    const vecs = await voyageEmbedBatch(texts.slice(i, i + VOYAGE_BATCH), inputType);
+  for (let i = 0; i < texts.length; i += COHERE_BATCH) {
+    const vecs = await cohereEmbedBatch(texts.slice(i, i + COHERE_BATCH), inputType);
     out.push(...vecs);
   }
   return out;
