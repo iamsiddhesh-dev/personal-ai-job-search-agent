@@ -2,18 +2,22 @@
 // the live match request. It runs in GitHub Actions, so a user search never
 // waits on embedding. Uses Voyage AI (see lib/llm).
 //
-// Cohere's free trial key allows 2,000 inputs/min (96 texts/request max). We
-// send 96-text requests spaced a few seconds apart to stay well under that —
-// ~1,400 inputs/min → the full ~15k corpus warms in ~12min, unattended. The
-// India/remote engineering subset is embedded first (priority ordering).
+// Cohere's docs claim 2,000 inputs/min for a trial key, but observed live
+// behavior on this key is far slower and hits 429s well before that — so this
+// runs CONSERVATIVELY paced (well under the documented limit) and leans on the
+// retry-with-wait loop below as the real safety net, not the pacing alone. Fully
+// unattended: on a persistent 429 it waits and retries the same batch for
+// several minutes before giving up for this run; the next scheduled run (every
+// 6h, see .github/workflows/embed-jobs.yml) resumes automatically from wherever
+// it stopped. No manual trigger needed once this is on `main`.
 //
 // Idempotent/resumable: only touches jobs where embedding IS NULL, so each run
 // resumes where the last stopped and later runs pick up newly-harvested jobs.
 //
 // Run:  npm run embed-jobs
 // Env:  EMBED_MAX          cap jobs embedded this run (default: all NULL)
-//       EMBED_BATCH        texts per request (default 96; Cohere's hard max)
-//       EMBED_PAUSE        seconds between requests (default 4; keeps < 2000/min)
+//       EMBED_BATCH        texts per request (default 48; Cohere's hard max is 96)
+//       EMBED_PAUSE        seconds between requests (default 15)
 //       EMBED_BUDGET_MIN   stop cleanly after N minutes (Actions 6h-cap guard)
 
 import { db } from "@/lib/db";
@@ -22,8 +26,8 @@ import { and, eq, isNull, sql } from "drizzle-orm";
 import { embedTexts } from "@/lib/llm";
 import { jobEmbeddingText } from "@/lib/agent/match";
 
-const BATCH = Number(process.env.EMBED_BATCH ?? 96);
-const PAUSE_MS = Number(process.env.EMBED_PAUSE ?? 4) * 1000;
+const BATCH = Number(process.env.EMBED_BATCH ?? 48);
+const PAUSE_MS = Number(process.env.EMBED_PAUSE ?? 15) * 1000;
 const MAX = process.env.EMBED_MAX ? Number(process.env.EMBED_MAX) : Infinity;
 const BUDGET_MS = process.env.EMBED_BUDGET_MIN ? Number(process.env.EMBED_BUDGET_MIN) * 60_000 : Infinity;
 const startedAt = Date.now();
@@ -80,10 +84,15 @@ async function main() {
     const batch = items.slice(i, i + BATCH);
 
     // Embed this batch, tolerating rate limits: on a 429, wait and retry the
-    // SAME batch rather than abandoning the run. Only give up after several
-    // retries (or the time budget); the next scheduled run resumes from there.
+    // SAME batch rather than abandoning the run. This is fully unattended, so
+    // keep retrying for as long as the time budget allows (not a small fixed
+    // attempt count) — the observed real limit on this key is stricter than
+    // documented, and patience here is what makes "no manual intervention"
+    // actually true. If the budget runs out mid-retry, the next scheduled run
+    // (every 6h) resumes automatically from wherever this one stopped.
     let vecs: number[][] | null = null;
-    for (let attempt = 0; attempt <= 5; attempt++) {
+    let attempt = 0;
+    for (;;) {
       try {
         vecs = await embedTexts(batch.map((b) => b.text));
         break;
@@ -91,15 +100,16 @@ async function main() {
         const msg = err instanceof Error ? err.message : String(err);
         const isRate = /429|quota|rate.?limit|RESOURCE_EXHAUSTED/i.test(msg);
         if (!isRate) throw err;
-        if (attempt >= 5 || Date.now() - startedAt > BUDGET_MS) {
+        attempt++;
+        if (Date.now() - startedAt > BUDGET_MS) {
           rateLimited = true;
           break;
         }
-        console.log(`  rate-limited — waiting 30s, then retrying this batch (attempt ${attempt + 1}/5)`);
+        console.log(`  rate-limited — waiting 30s, then retrying this batch (attempt ${attempt})`);
         await sleep(30_000);
       }
     }
-    if (vecs === null) break; // gave up (persistent limit or over budget)
+    if (vecs === null) break; // gave up (only happens once the time budget is exhausted)
 
     for (let k = 0; k < batch.length; k++) {
       await db.update(jobs).set({ embedding: vecs[k] }).where(eq(jobs.id, batch[k].jobId));

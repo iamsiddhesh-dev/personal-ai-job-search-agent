@@ -34,13 +34,16 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - name: Embed jobs (Cohere, free-tier paced)
+      - name: Embed jobs (Cohere, conservatively paced)
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           COHERE_API_KEY: ${{ secrets.COHERE_API_KEY }}
-          # Cohere trial = 2,000 inputs/min. 96 texts/request every 4s ≈ 1,440/min,
-          # comfortably under. The full ~15k corpus finishes in ~12min, one run.
-          EMBED_BATCH: "96"
-          EMBED_PAUSE: "4"
+          # Cohere docs claim 2,000 inputs/min for a trial key, but this key's
+          # real observed throughput is far below that. Run conservatively and
+          # let the script's retry-with-wait loop absorb 429s — fully unattended,
+          # no manual re-trigger ever needed; the 6-hourly schedule + idempotent
+          # resume finishes the corpus over however many runs it takes.
+          EMBED_BATCH: "48"
+          EMBED_PAUSE: "15"
           EMBED_BUDGET_MIN: "320"
         run: npm run embed-jobs:ci
