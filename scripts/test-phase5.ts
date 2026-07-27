@@ -31,6 +31,7 @@ async function main() {
     location: facts.location,
     skills: merged.skills,
     projects: merged.projects,
+    experience: facts.experience,
     embedding: merged.embedding,
     summaryText: "",
   };
@@ -39,7 +40,7 @@ async function main() {
   const searchOpts = { roleFocus: "any", locationPref: "anywhere" as const, teamSizeBucket: "any" as const };
 
   console.log("\n=== Search #1 (baseline, no exclusions) ===");
-  const before = await runMatch(profile, { ...searchOpts, finalLimit: 10, verifyLinks: false, log: console.log });
+  const before = await runMatch(profile, { ...searchOpts, maxResults: 10, verifyLinks: false, log: console.log });
   if (before.length === 0) throw new Error("Baseline search returned 0 results — nothing to test against.");
   const target = before[0];
   console.log(`Picked target: "${target.title}" @ ${target.company} (jobId=${target.jobId})`);
@@ -58,7 +59,7 @@ async function main() {
     const after = await runMatch(profile, {
       ...searchOpts,
       excludeJobIds: excluded,
-      finalLimit: 10,
+      maxResults: 10,
       verifyLinks: false,
       log: console.log,
     });

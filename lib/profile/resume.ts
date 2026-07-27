@@ -92,7 +92,48 @@ ${text}
 }
 
 export async function extractResumeFacts(text: string): Promise<ResumeFacts> {
-  return extractStructured({ prompt: buildExtractionPrompt(text), schema: resumeFactsSchema });
+  return extractStructured({ task: "resumeExtraction", prompt: buildExtractionPrompt(text), schema: resumeFactsSchema });
+}
+
+// Second pass over already-extracted facts, checked against the original text.
+// Catches the two failure modes seen in production: (1) a real job/internship
+// misfiled as a "project" (or vice versa), which silently starves the matcher's
+// experience signal — see lib/agent/match.ts's leadProof logic, which prioritizes
+// experience over projects and needs `experience` to actually be populated; and
+// (2) a skill/claim in the output that isn't actually backed by the resume text.
+// Runs on a separate, cheap/fast model (task "hardening") since it's a bounded
+// proofreading job, not open-ended extraction.
+function buildHardeningPrompt(text: string, facts: ResumeFacts): string {
+  return `You are proofreading structured facts that were extracted from a resume, checking them against the original text. Fix ONLY these two problems, and leave everything else exactly as-is:
+
+1. MISCLASSIFICATION: an entry in "experience" that is actually a personal/academic project (no employer, unpaid, course work) should move to "projects" — and vice versa: a real job or internship (has an employer/company, even unpaid, even short) that was filed under "projects" should move to "experience". Recompute "yearsOfExperience" if this changes what counts as professional experience, following the same rule as before: relevant professional/technical experience only, freelance non-engineering work excluded, projects/internships-only history is 0.
+2. HALLUCINATION: any skill, claim, or detail in the JSON that is NOT actually present in the resume text below must be removed.
+
+If nothing is wrong, return the facts unchanged.
+
+Resume text:
+"""
+${text}
+"""
+
+Extracted facts (JSON) to check:
+${JSON.stringify(facts, null, 2)}`;
+}
+
+// Non-fatal by design: this is a quality improvement on top of an already-valid
+// extraction, and it sends the largest prompt we build (full resume + full
+// prior JSON). If it fails for any reason, the un-hardened facts are still
+// perfectly usable — returning those beats failing the whole upload.
+export async function hardenResumeFacts(text: string, facts: ResumeFacts): Promise<ResumeFacts> {
+  try {
+    return await extractStructured({
+      task: "hardening",
+      prompt: buildHardeningPrompt(text, facts),
+      schema: resumeFactsSchema,
+    });
+  } catch {
+    return facts;
+  }
 }
 
 export async function parseResume(
@@ -100,6 +141,7 @@ export async function parseResume(
   kind: ResumeFileKind,
 ): Promise<{ text: string; facts: ResumeFacts }> {
   const text = await extractResumeText(bytes, kind);
-  const facts = await extractResumeFacts(text);
+  const rawFacts = await extractResumeFacts(text);
+  const facts = await hardenResumeFacts(text, rawFacts);
   return { text, facts };
 }

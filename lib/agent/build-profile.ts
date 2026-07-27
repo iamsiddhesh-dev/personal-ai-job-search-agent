@@ -3,7 +3,7 @@
 // hand-assembly so the request path and the exit-test script build the same
 // shape from the same source data.
 
-import type { MatchProfile, MatchProject } from "./match";
+import type { MatchProfile, MatchProject, MatchExperience } from "./match";
 import type { ResumeFacts } from "@/lib/profile/resume";
 
 interface ProfileRow {
@@ -31,12 +31,12 @@ function toVec(v: unknown): number[] | null {
 export function buildMatchProfileFromRow(row: ProfileRow): MatchProfile {
   const facts = (row.resumeFacts ?? null) as ResumeFacts | null;
 
+  // Experience gets its own structured field (below) so the matcher can give it
+  // equal billing with projects instead of burying it in prose — see
+  // lib/agent/match.ts's leadProof logic, which prioritizes real jobs/internships
+  // over projects when picking what to lead with. summaryText now only carries
+  // education + any prose the structured fields don't capture.
   const summaryParts: string[] = [];
-  for (const e of facts?.experience ?? []) {
-    summaryParts.push(
-      `Experience: ${e.title} at ${e.company}${e.duration ? ` (${e.duration})` : ""} — ${e.summary}`,
-    );
-  }
   for (const ed of facts?.education ?? []) {
     summaryParts.push(
       `Education: ${ed.degree}, ${ed.institution}${ed.graduationYear ? ` (${ed.graduationYear})` : ""}`,
@@ -57,6 +57,14 @@ export function buildMatchProfileFromRow(row: ProfileRow): MatchProfile {
     location: facts?.location ?? null,
     skills: row.skills ?? [],
     projects: (row.projects as MatchProject[] | null) ?? [],
+    experience: (facts?.experience ?? []).map(
+      (e): MatchExperience => ({
+        title: e.title,
+        company: e.company,
+        duration: e.duration,
+        summary: e.summary,
+      }),
+    ),
     embedding,
     summaryText: summaryParts.join("\n"),
   };

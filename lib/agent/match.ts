@@ -13,9 +13,12 @@
 //        harvester (scripts/embed-jobs.ts), so a live search reads vectors and
 //        waits on nothing. Using the same premium Gemini model offline means
 //        zero quality loss and seconds, not minutes, of latency.
-//   3. LLM re-rank        — Gemini Flash scores those ~60 on product<->project
-//        overlap, requirement/seniority match, India location feasibility and
-//        hiring-signal strength -> returns 20-25 with lead_project/gaps/rationale.
+//   3. LLM re-rank        — scores those ~60 (in token-safe batches, see
+//        RERANK_BATCH_SIZE) on true-capability overlap (real experience first,
+//        projects second), requirement/seniority match, India location
+//        feasibility and hiring-signal strength -> every job that scores above
+//        a threshold is returned (not a fixed top-N) with leadProof/gaps/
+//        rationale.
 //   4. Link liveness      — HEAD-check the final apply URLs and drop any that
 //        have gone dead since the last harvest (catches same-day closures).
 //
@@ -42,6 +45,13 @@ export interface MatchProject {
   source: string;
 }
 
+export interface MatchExperience {
+  title: string;
+  company: string;
+  duration: string | null;
+  summary: string;
+}
+
 export interface MatchProfile {
   name: string | null;
   seniority: string | null;
@@ -52,6 +62,10 @@ export interface MatchProfile {
   location: string | null;
   skills: string[];
   projects: MatchProject[];
+  // Real jobs/internships, kept as a first-class structured field (not buried
+  // in summaryText) so the LLM re-rank can weigh it as heavily as projects —
+  // see the leadProof logic below, which prioritizes this over projects.
+  experience: MatchExperience[];
   embedding: number[]; // 1024-dim (Voyage voyage-4), from profiles.embedding
   // Rich free-text the LLM re-rank reads (resume summary + experience). Kept
   // separate from `embedding` so the LLM sees prose, not a vector.
@@ -70,8 +84,15 @@ export interface MatchOptions {
   maxYearsRequired?: number;
   dropSeniorTitles?: boolean;
   candidateCap?: number; // ranking-pool ceiling; default 1500
-  vectorTopK?: number; // hand-off size to the LLM; default 60
-  finalLimit?: number; // final results; default 25
+  vectorTopK?: number; // hand-off size to the LLM; default 40 (5 batches of 8)
+  // Selection is now score-threshold-based, not a fixed top-N: every candidate
+  // the LLM scores >= minScore is returned (real fit, whatever the count),
+  // relaxed to minScoreFallback if that's too sparse to be useful, capped at
+  // maxResults so a search can't return an unreasonably huge list.
+  minScore?: number; // default 70
+  minScoreFallback?: number; // default 60; used only if minScore yields < minResultsBeforeFallback
+  minResultsBeforeFallback?: number; // default 5
+  maxResults?: number; // hard cap on returned results; default 40
   verifyLinks?: boolean; // live-check the final apply URLs; default true
   log?: (msg: string) => void;
 }
@@ -92,7 +113,16 @@ export interface RankedMatch {
   source: string;
   score: number; // 0-100, from the LLM
   vectorScore: number; // cosine, stage 2
-  leadProject: string;
+  // What to lead with when reaching out. Real experience (a job/internship)
+  // wins over a project whenever the candidate has relevant experience;
+  // a project only leads when there's no relevant experience to cite.
+  leadProof: string;
+  leadProofType: "experience" | "project";
+  // A specific project worth also calling out, ONLY when it meaningfully
+  // strengthens the case beyond leadProof (e.g. leadProof is an internship,
+  // but a project is an unusually strong, directly-relevant build). null
+  // when there's nothing to add.
+  standoutProject: string | null;
   gaps: string[];
   rationale: string;
   hiringSignal: "verified" | "inferred";
@@ -406,16 +436,27 @@ const rerankSchema = z.object({
     z.object({
       jobIndex: z.number().int().describe("the 1-based index of the job from the list"),
       score: z.number().min(0).max(100),
-      leadProject: z
+      leadProof: z
         .string()
-        .describe("the exact name of ONE of the candidate's real projects to lead with for this role"),
+        .describe(
+          "what to lead with for this role: if the candidate has a REAL job/internship relevant to this role, cite it (title at company) — real experience beats projects. Only cite a project here if the candidate has no relevant experience at all.",
+        ),
+      leadProofType: z
+        .enum(["experience", "project"])
+        .describe("'experience' if leadProof is a job/internship, 'project' if it's a project"),
+      standoutProject: z
+        .string()
+        .nullable()
+        .describe(
+          "the exact name of ONE candidate project worth ALSO mentioning, ONLY if it meaningfully strengthens the case beyond leadProof (e.g. it's an unusually strong, directly-relevant build). null if there's nothing worth adding.",
+        ),
       gaps: z
         .array(z.string())
         .describe("concrete skills/experience this specific role wants that the candidate is missing; [] if none"),
       rationale: z
         .string()
         .describe(
-          "one or two specific sentences: what this company is building and the concrete project/skill overlap that makes it a fit. No boilerplate.",
+          "one or two specific sentences: what this company is building and the concrete experience/project/skill overlap that makes it a fit. No boilerplate.",
         ),
       hiringSignal: z
         .enum(["verified", "inferred"])
@@ -425,6 +466,12 @@ const rerankSchema = z.object({
 });
 
 function profileBlock(profile: MatchProfile): string {
+  const experience = profile.experience
+    .map(
+      (e) =>
+        `  - ${e.title} at ${e.company}${e.duration ? ` (${e.duration})` : ""}: ${e.summary}`,
+    )
+    .join("\n");
   const projects = profile.projects
     .map((p) => `  - ${p.name} [${p.source}]: ${p.description} (tech: ${p.technologies.join(", ") || "n/a"})`)
     .join("\n");
@@ -434,7 +481,8 @@ function profileBlock(profile: MatchProfile): string {
     `Years of professional experience: ${profile.yearsExperience}`,
     `Seniority: ${profile.seniority ?? "unstated — treat as early-career"}`,
     `Skills: ${profile.skills.join(", ") || "n/a"}`,
-    `Projects (proof of work):\n${projects || "  (none)"}`,
+    `Real experience — jobs/internships (this is the STRONGEST proof of work; prioritize citing this when relevant):\n${experience || "  (none — this candidate has no professional experience yet, projects are their only proof of work)"}`,
+    `Projects (secondary proof of work — cite when there's no relevant experience, or when a specific project is a standout that strengthens an experience-led case):\n${projects || "  (none)"}`,
     "",
     "Fuller background:",
     profile.summaryText,
@@ -445,7 +493,7 @@ function jobsBlock(ranked: Ranked[]): string {
   return ranked
     .map((r, i) => {
       const c = r.cand;
-      const desc = c.description ? stripHtml(c.description).slice(0, 700) : "(no description)";
+      const desc = c.description ? stripHtml(c.description).slice(0, JOB_DESC_CHARS) : "(no description)";
       const salary =
         c.salaryMin || c.salaryMax ? `\n  salary: ${c.salaryMin ?? "?"}–${c.salaryMax ?? "?"}` : "";
       return `[${i + 1}] ${c.title} @ ${c.companyName}\n  location: ${c.location ?? "n/a"}${
@@ -455,7 +503,7 @@ function jobsBlock(ranked: Ranked[]): string {
     .join("\n\n");
 }
 
-function rerankPrompt(profile: MatchProfile, ranked: Ranked[], finalLimit: number): string {
+function rerankPrompt(profile: MatchProfile, ranked: Ranked[]): string {
   return `You are a hiring consultant working the recruiter side for ONE candidate. You are NOT a job board — rank by genuine fit, not company fame (REVISED-PLAN §10).
 
 CANDIDATE
@@ -465,16 +513,17 @@ OPEN ROLES (already pre-filtered by role, seniority, location and vector similar
 ${jobsBlock(ranked)}
 
 TASK
-Score each role 0–100 on the weighted combination:
-- Product ↔ project overlap: does what this company builds line up with something the candidate has actually built? This matters most. Reward concrete overlap ("they're building onboarding, he built an Onboarding Copilot"), not vague topical similarity.
+Score EVERY role listed above, 0–100, on the weighted combination:
+- True-capability overlap: does what this company builds line up with what the candidate has actually DONE? Real, relevant job/internship experience is the strongest signal — weigh it above projects whenever the candidate has any. Projects are the primary signal only when the candidate has no relevant experience; an unusually strong, directly-relevant project can also add to (not replace) an experience-led case. Reward concrete overlap ("they're building onboarding, he shipped onboarding flows at Acme"), not vague topical similarity.
 - Requirement & seniority match: the candidate has ${profile.yearsExperience} years of professional experience. A role clearly wanting significantly more experience, or a senior/staff specialty, is a weak fit even if the domain matches — score it low and say so in gaps. Do not reward roles the candidate is plainly under-qualified for.
 - Location feasibility for someone based in India: an onsite US/EU role is a poor fit unless it is genuinely remote-friendly to India. Reflect this in the score and call it out in gaps when relevant.
 - Hiring-signal strength: all of these are verified live openings, so use "verified"; only use "inferred" if you are truly guessing.
 
 RULES
-- Return ONLY the best ${finalLimit} roles, sorted by score descending (highest first).
+- Score and return ALL roles listed above — do not omit any, do not pre-filter to a top N (a later step selects which ones to show).
 - rationale MUST be specific to the actual company and a concrete piece of the candidate's proof-of-work. Never generic ("great fit for your skills"). If you cannot name a specific overlap, the score should be low.
-- leadProject MUST be the exact name of one of the candidate's real projects listed above.
+- leadProof: if the candidate has real, relevant job/internship experience, cite it (title at company) — this is almost always the right choice when it exists. Only cite a project as leadProof when the candidate has no relevant experience at all.
+- standoutProject: leave null unless a specific project genuinely adds something leadProof doesn't already cover — don't force one in just to fill the field.
 - gaps are concrete and role-specific (a missing skill, missing years, a location mismatch). Empty array if genuinely none.
 - Never invent a hiring signal or a requirement that isn't in the role text.`;
 }
@@ -515,14 +564,47 @@ async function verifyApplyLinks(matches: RankedMatch[], log: (m: string) => void
   return kept;
 }
 
+// Jobs per Stage-3 LLM call. Batching bounds prompt size per call so no single
+// request can exceed a provider's per-request token ceiling.
+//
+// Sizing is measured, not guessed: the profile block plus instructions is a
+// fixed ~1.2k tokens, and each job adds ~250 (its metadata plus a
+// JOB_DESC_CHARS-capped description). The tightest ceiling we target is Groq's
+// 8000 TPM, and a request must fit with room to spare because the limit is
+// per-MINUTE, not per-request — concurrent batches share it.
+//   15 jobs measured 8431 tokens and was rejected outright ("Request too large
+//   … Limit 8000"). That was the original production crash.
+//    8 jobs lands near ~3.2k, so two can be in flight and still fit.
+const RERANK_BATCH_SIZE = 8;
+
+// Characters of job description handed to the re-rank. The single biggest lever
+// on prompt size; 700 was generous enough to push a batch over the limit.
+const JOB_DESC_CHARS = 500;
+
+// How many rerank batches may be in flight at once. Batching alone doesn't fix
+// a TPM cap: firing every batch in parallel spends all their tokens inside the
+// same minute, which is what the cap actually measures. Two in flight keeps a
+// Groq-served rerank under 8k TPM and a Cerebras-served one under its 5
+// requests/minute.
+const RERANK_CONCURRENCY = 2;
+
+function chunk<T>(arr: T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+  return out;
+}
+
 // ---------------------------------------------------------------------------
 // Orchestrator
 // ---------------------------------------------------------------------------
 
 export async function runMatch(profile: MatchProfile, opts: MatchOptions): Promise<RankedMatch[]> {
   const log = opts.log ?? (() => {});
-  const finalLimit = opts.finalLimit ?? 25;
-  const topK = opts.vectorTopK ?? 60;
+  const minScore = opts.minScore ?? 70;
+  const minScoreFallback = opts.minScoreFallback ?? 60;
+  const minResultsBeforeFallback = opts.minResultsBeforeFallback ?? 5;
+  const maxResults = opts.maxResults ?? 40;
+  const topK = opts.vectorTopK ?? 40;
 
   // Seniority gate, derived from the candidate's years unless the caller overrode
   // it. A 0-year fresher gets maxYears=2 (so "3+ years" roles are dropped) and
@@ -551,41 +633,65 @@ export async function runMatch(profile: MatchProfile, opts: MatchOptions): Promi
   if (ranked.length === 0) return [];
 
   log("Stage 3 — LLM re-rank");
-  const { matches } = await extractStructured({
-    prompt: rerankPrompt(profile, ranked, finalLimit),
-    schema: rerankSchema,
-  });
-  log(`  LLM returned ${matches.length} scored matches`);
+  const batches = chunk(ranked, RERANK_BATCH_SIZE);
+  const batchResults = await mapLimit(batches, RERANK_CONCURRENCY, (batch) =>
+    extractStructured({
+      task: "rerank",
+      prompt: rerankPrompt(profile, batch),
+      schema: rerankSchema,
+    }),
+  );
+  log(`  LLM scored ${batches.length} batch(es) of up to ${RERANK_BATCH_SIZE} jobs each`);
 
-  // Map the LLM's 1-based indices back onto the candidate rows, dropping any
-  // out-of-range or duplicate index the model might hallucinate.
+  // Map each batch's 1-based indices back onto the overall `ranked` array,
+  // dropping any out-of-range or duplicate index the model might hallucinate.
   const seen = new Set<number>();
-  let out: RankedMatch[] = [];
-  for (const m of matches) {
-    const idx = m.jobIndex - 1;
-    if (idx < 0 || idx >= ranked.length || seen.has(idx)) continue;
-    seen.add(idx);
-    const c = ranked[idx].cand;
-    out.push({
-      jobId: c.jobId,
-      title: c.title,
-      company: c.companyName,
-      location: c.location,
-      isRemote: c.isRemote,
-      applyUrl: c.applyUrl,
-      teamSize: c.teamSize,
-      ycBatch: c.ycBatch,
-      source: c.source,
-      score: m.score,
-      vectorScore: ranked[idx].vectorScore,
-      leadProject: m.leadProject,
-      gaps: m.gaps,
-      rationale: m.rationale,
-      hiringSignal: m.hiringSignal,
-    });
+  const scored: RankedMatch[] = [];
+  batchResults.forEach(({ matches }, batchIdx) => {
+    const offset = batchIdx * RERANK_BATCH_SIZE;
+    const batchLen = batches[batchIdx].length;
+    for (const m of matches) {
+      const localIdx = m.jobIndex - 1;
+      if (localIdx < 0 || localIdx >= batchLen) continue;
+      const idx = offset + localIdx;
+      if (seen.has(idx)) continue;
+      seen.add(idx);
+      const c = ranked[idx].cand;
+      scored.push({
+        jobId: c.jobId,
+        title: c.title,
+        company: c.companyName,
+        location: c.location,
+        isRemote: c.isRemote,
+        applyUrl: c.applyUrl,
+        teamSize: c.teamSize,
+        ycBatch: c.ycBatch,
+        source: c.source,
+        score: m.score,
+        vectorScore: ranked[idx].vectorScore,
+        leadProof: m.leadProof,
+        leadProofType: m.leadProofType,
+        standoutProject: m.standoutProject,
+        gaps: m.gaps,
+        rationale: m.rationale,
+        hiringSignal: m.hiringSignal,
+      });
+    }
+  });
+  scored.sort((a, b) => b.score - a.score);
+
+  // Threshold-based selection, not a fixed top-N: show whatever genuinely
+  // scores >= minScore. If that's too sparse to be useful, relax once to
+  // minScoreFallback; if still sparse, that's the honest result (the pool just
+  // doesn't have many strong matches) — always capped at maxResults.
+  let out = scored.filter((m) => m.score >= minScore);
+  let usedThreshold = minScore;
+  if (out.length < minResultsBeforeFallback) {
+    out = scored.filter((m) => m.score >= minScoreFallback);
+    usedThreshold = minScoreFallback;
   }
-  out.sort((a, b) => b.score - a.score);
-  out = out.slice(0, finalLimit);
+  log(`  ${out.length} match(es) >= ${usedThreshold} (of ${scored.length} scored)`);
+  out = out.slice(0, maxResults);
 
   if (opts.verifyLinks ?? true) {
     log("Stage 4 — apply-link liveness check");

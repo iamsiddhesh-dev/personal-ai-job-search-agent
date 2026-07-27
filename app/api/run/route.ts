@@ -45,7 +45,6 @@ export async function POST(req: Request) {
           locationPref,
           teamSizeBucket,
           excludeJobIds,
-          finalLimit: 25,
           log: (m) => send({ type: "status", message: m }),
         });
         // Persist the run + matches so each result carries a matches.id the

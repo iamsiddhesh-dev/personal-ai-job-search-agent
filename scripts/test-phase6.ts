@@ -26,9 +26,6 @@ const N_DRAFTS = 3; // distinct companies to draft for
 
 function buildSummaryText(facts: Awaited<ReturnType<typeof parseResume>>["facts"]): string {
   const parts: string[] = [];
-  for (const e of facts.experience) {
-    parts.push(`Experience: ${e.title} at ${e.company}${e.duration ? ` (${e.duration})` : ""} — ${e.summary}`);
-  }
   for (const ed of facts.education) {
     parts.push(`Education: ${ed.degree}, ${ed.institution}${ed.graduationYear ? ` (${ed.graduationYear})` : ""}`);
   }
@@ -63,6 +60,7 @@ async function main() {
     location: facts.location,
     skills: merged.skills,
     projects: merged.projects,
+    experience: facts.experience,
     embedding: merged.embedding,
     summaryText: buildSummaryText(facts),
   };
@@ -77,6 +75,7 @@ async function main() {
       technologies: p.technologies,
       url: p.url ?? null,
     })),
+    experience: facts.experience,
   };
 
   console.log(`\n=== Running match (role='${roleFocus}', location='${locationPref}') ===`);
@@ -84,7 +83,7 @@ async function main() {
     roleFocus,
     locationPref,
     teamSizeBucket: "any",
-    finalLimit: 8,
+    maxResults: 8,
     log: (m) => console.log(m),
   });
   if (results.length < N_DRAFTS) {
@@ -125,7 +124,13 @@ async function main() {
         description: jobRow?.description ?? null,
         applyUrl: r.applyUrl,
       },
-      { leadProject: r.leadProject, rationale: r.rationale, gaps: r.gaps },
+      {
+        leadProof: r.leadProof,
+        leadProofType: r.leadProofType,
+        standoutProject: r.standoutProject,
+        rationale: r.rationale,
+        gaps: r.gaps,
+      },
     );
 
     allDrafts.push({
@@ -136,7 +141,7 @@ async function main() {
     });
 
     console.log(`\n────────────────────────────────────────────────────────`);
-    console.log(`### ${r.title} @ ${r.company}  (lead: ${r.leadProject})`);
+    console.log(`### ${r.title} @ ${r.company}  (lead [${r.leadProofType}]: ${r.leadProof})`);
     console.log(`\n--- COLD EMAIL ---`);
     console.log(`Subject: ${drafts.email.subject}`);
     console.log(drafts.email.body);
