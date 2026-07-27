@@ -54,6 +54,7 @@ export function buildMatchProfileFromRow(row: ProfileRow): MatchProfile {
     name: row.name,
     seniority: row.seniority,
     yearsExperience: facts?.yearsOfExperience ?? 0,
+    isCurrentStudent: facts?.isCurrentStudent ?? false,
     location: facts?.location ?? null,
     skills: row.skills ?? [],
     projects: (row.projects as MatchProject[] | null) ?? [],
