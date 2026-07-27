@@ -1,6 +1,5 @@
 import type { RankedMatch } from "@/lib/agent/match";
 
-export type InputMode = "text" | "chips" | "sources" | "none";
 
 export interface ChatMessage {
   id: string;

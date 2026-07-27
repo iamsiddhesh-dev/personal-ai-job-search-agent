@@ -255,6 +255,27 @@ export async function extractStructured<S extends ZodTypeAny>(params: {
   throw lastErr;
 }
 
+// --- Chat (tool-calling) -----------------------------------------------------
+// The conversational agent needs TOOL CALLING, which is a different capability
+// from the structured output above and narrows the field sharply:
+//   groq gpt-oss-120b — works (2/2 measured). The chat workhorse.
+//   cerebras          — rejects tool definitions outright (400). Excluded.
+//   google gemini     — capable, but 20 requests/DAY per key is nowhere near
+//                       enough for a loop that fires on every message. Kept as
+//                       a last-ditch backstop only.
+//
+// Returns a ready-to-try list: every key of the preferred provider first, then
+// the backstop. The caller walks it until one succeeds.
+export function chatModelChain(): LanguageModel[] {
+  const steps: ModelStep[] = [
+    { provider: "groq", model: GROQ_GPT_OSS_120B },
+    { provider: "google", model: GEMINI_FLASH },
+  ];
+  return steps.flatMap(({ provider, model }) =>
+    keysFor(provider).map((key) => clientFor(provider, key)(model)),
+  );
+}
+
 // --- Embeddings (Cohere) -----------------------------------------------------
 // Direct REST call (thin fetch client, no extra dependency). Cohere's free trial
 // key needs no payment method and allows 2,000 inputs/min — orders of magnitude
