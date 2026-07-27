@@ -91,8 +91,19 @@ ${text}
 """`;
 }
 
+// A given resume's text never changes, so a re-upload of the same file (or a
+// re-parse triggered by some other flow) is the exact same question asked
+// twice — cache it near-indefinitely rather than re-spending a free-tier call
+// on an answer that can't have changed.
+const RESUME_CACHE_TTL_MS = 90 * 24 * 60 * 60 * 1000; // 90 days
+
 export async function extractResumeFacts(text: string): Promise<ResumeFacts> {
-  return extractStructured({ task: "resumeExtraction", prompt: buildExtractionPrompt(text), schema: resumeFactsSchema });
+  return extractStructured({
+    task: "resumeExtraction",
+    prompt: buildExtractionPrompt(text),
+    schema: resumeFactsSchema,
+    cacheTtlMs: RESUME_CACHE_TTL_MS,
+  });
 }
 
 // Second pass over already-extracted facts, checked against the original text.
@@ -130,6 +141,9 @@ export async function hardenResumeFacts(text: string, facts: ResumeFacts): Promi
       task: "hardening",
       prompt: buildHardeningPrompt(text, facts),
       schema: resumeFactsSchema,
+      // Deterministic in its inputs (same resume text + same prior extraction
+      // -> same check), so it caches on the same terms as extraction itself.
+      cacheTtlMs: RESUME_CACHE_TTL_MS,
     });
   } catch {
     return facts;
