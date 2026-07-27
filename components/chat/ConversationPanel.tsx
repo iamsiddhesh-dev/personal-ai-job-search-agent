@@ -10,7 +10,7 @@
 // in a chat message), and its outcome is narrated back into the thread so the
 // agent can react to it on the next turn.
 
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import ChatThread from "./ChatThread";
 import Composer from "./Composer";
 import FollowupsBanner from "./FollowupsBanner";
@@ -19,8 +19,12 @@ import type { ChatMessage, RankedMatch } from "./types";
 let idCounter = 0;
 const nextId = () => `m${++idCounter}`;
 
-const OPENER =
-  "hey — i'm backdoor. i help people land roles at early-stage startups.\n\nwhat's your name?";
+// Pre-filled into the composer when the panel opens — the user confirms by
+// hitting Enter/Send, nothing is sent automatically. Every REPLY after this is
+// LLM-generated (see lib/chat/agent.ts's system prompt); this is just the seed
+// that kicks off the very first turn, since there's no prior message for the
+// agent to react to yet.
+export const OPENER_DRAFT = "hey — i'm here, help me find startup jobs";
 
 interface Turn {
   role: "user" | "assistant";
@@ -33,19 +37,13 @@ export default function ConversationPanel() {
   const [busy, setBusy] = useState(false);
 
   // The model-facing transcript, kept separate from the rendered messages:
-  // status lines and job cards are UI-only, while tool outcomes we want the
-  // agent to remember get pushed here as plain text.
+  // job cards are UI-only, while tool outcomes we want the agent to remember
+  // get pushed here as plain text. Status lines (which stage a search is in,
+  // candidate counts, etc.) are internal instrumentation — they stay in the
+  // server console (see runMatch's log callback) and never reach either the
+  // transcript or the UI. What the user sees is only what a human would want
+  // to see: the typing indicator while something runs, then the actual reply.
   const historyRef = useRef<Turn[]>([]);
-  const startedRef = useRef(false);
-
-  useEffect(() => {
-    // Strict Mode double-mounts effects in dev; without this the opener would
-    // be pushed twice.
-    if (startedRef.current) return;
-    startedRef.current = true;
-    pushMessage({ role: "agent", kind: "text", text: OPENER });
-    historyRef.current.push({ role: "assistant", content: OPENER });
-  }, []);
 
   function pushMessage(msg: Omit<ChatMessage, "id">) {
     setMessages((prev) => [...prev, { id: nextId(), ...msg }]);
@@ -82,8 +80,10 @@ export default function ConversationPanel() {
             jobs?: RankedMatch[];
           };
 
-          if (event.type === "status" && event.message) {
-            pushMessage({ role: "agent", kind: "text", text: event.message });
+          if (event.type === "status") {
+            // Internal instrumentation (which pipeline stage is running, candidate
+            // counts, etc.) — never a UI concern. The typing indicator already
+            // communicates "working on it" without exposing implementation detail.
           } else if (event.type === "jobs" && event.jobs) {
             setIsTyping(false);
             pushMessage({ role: "agent", kind: "jobs", jobs: event.jobs });
@@ -158,7 +158,12 @@ export default function ConversationPanel() {
     <>
       <FollowupsBanner />
       <ChatThread messages={messages} isTyping={isTyping} />
-      <Composer disabled={busy || isTyping} onSubmit={handleSubmit} onAttach={handleAttach} />
+      <Composer
+        disabled={busy || isTyping}
+        initialValue={messages.length === 0 ? OPENER_DRAFT : undefined}
+        onSubmit={handleSubmit}
+        onAttach={handleAttach}
+      />
     </>
   );
 }

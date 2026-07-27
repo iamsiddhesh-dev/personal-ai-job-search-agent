@@ -59,6 +59,10 @@ export interface MatchProfile {
   // grad). This is what gates out senior, high-YOE roles — GitHub can't measure
   // it, so it comes from the resume/LinkedIn, defaulting to 0 when unknown.
   yearsExperience: number;
+  // Drives the Stage-1 active-enrollment gate: a role requiring active student
+  // status is dropped unless this is true, and vice versa. From the resume's
+  // stated education status; defaults to false when unknown.
+  isCurrentStudent: boolean;
   location: string | null;
   skills: string[];
   projects: MatchProject[];
@@ -84,7 +88,7 @@ export interface MatchOptions {
   maxYearsRequired?: number;
   dropSeniorTitles?: boolean;
   candidateCap?: number; // ranking-pool ceiling; default 1500
-  vectorTopK?: number; // hand-off size to the LLM; default 40 (5 batches of 8)
+  vectorTopK?: number; // hand-off size to the LLM; default 24 (3 batches of 8)
   // Selection is now score-threshold-based, not a fixed top-N: every candidate
   // the LLM scores >= minScore is returned (real fit, whatever the count),
   // relaxed to minScoreFallback if that's too sparse to be useful, capped at
@@ -337,6 +341,21 @@ export function requiredYears(description: string | null): number | null {
     }
   }
   return max;
+}
+
+// Detects a JD requiring the candidate to be an ACTIVE student (a real failure
+// mode seen in production: a graduated candidate was shown roles explicitly
+// scoped to students currently pursuing a degree — a categorically wrong
+// match no amount of skill overlap should paper over). Matches phrasing like
+// "currently pursuing", "must be enrolled", "expected graduation", rather than
+// a bare "student" mention (which can appear in unrelated context, e.g. "we
+// hire from top student communities").
+const ACTIVE_STUDENT_RX =
+  /currently (?:pursuing|enrolled)|must be enrolled|actively enrolled|expected graduation|anticipated graduation|graduating in \d{4}|current(?:ly)? (?:a )?(?:university|college) student|penultimate.year|final.year student/i;
+
+export function requiresActiveEnrollment(description: string | null): boolean {
+  if (!description) return false;
+  return ACTIVE_STUDENT_RX.test(stripHtml(description));
 }
 
 // ---------------------------------------------------------------------------
@@ -610,7 +629,13 @@ export async function runMatch(profile: MatchProfile, opts: MatchOptions): Promi
   const minScoreFallback = opts.minScoreFallback ?? 60;
   const minResultsBeforeFallback = opts.minResultsBeforeFallback ?? 5;
   const maxResults = opts.maxResults ?? 40;
-  const topK = opts.vectorTopK ?? 40;
+  // Fewer candidates handed to the LLM means fewer batches means fewer API
+  // calls — the cheapest lever for making a fixed free-tier quota stretch
+  // further, since job re-rank is the single heaviest task in the app (see
+  // RERANK_BATCH_SIZE). 24 = 3 batches instead of 5 at RERANK_BATCH_SIZE=8,
+  // while Stage 2's cosine ranking already did the hard work of surfacing the
+  // strongest candidates first, so the cut mostly trims the pool's weak tail.
+  const topK = opts.vectorTopK ?? 24;
 
   // Seniority gate, derived from the candidate's years unless the caller overrode
   // it. A 0-year fresher gets maxYears=2 (so "3+ years" roles are dropped) and
@@ -620,14 +645,27 @@ export async function runMatch(profile: MatchProfile, opts: MatchOptions): Promi
 
   log("Stage 1 — rule filter");
   const raw = await ruleFilter(opts, dropSeniorTitles);
-  // JD "N+ years" gate (needs the description text, so it runs in JS here).
+  // JD "N+ years" gate and the active-enrollment gate both need the
+  // description text, so they run in JS here rather than SQL.
+  let yearsDropped = 0;
+  let enrollmentDropped = 0;
   const candidates = raw.filter((c) => {
     const req = requiredYears(c.description);
-    return req === null || req <= maxYears;
+    if (req !== null && req > maxYears) {
+      yearsDropped++;
+      return false;
+    }
+    // A graduated candidate should never see a role scoped to active students
+    // (a categorically wrong match, not a skill-overlap question) — and
+    // symmetrically, a current student shouldn't be gated OUT of those roles.
+    if (requiresActiveEnrollment(c.description) && !profile.isCurrentStudent) {
+      enrollmentDropped++;
+      return false;
+    }
+    return true;
   });
-  const yearsDropped = raw.length - candidates.length;
   log(
-    `  ${candidates.length} candidates (role='${opts.roleFocus}', loc='${opts.locationPref}', team='${opts.teamSizeBucket ?? "any"}', maxYears=${maxYears}, seniorTitlesDropped=${dropSeniorTitles}; ${yearsDropped} dropped by JD years gate)`,
+    `  ${candidates.length} candidates (role='${opts.roleFocus}', loc='${opts.locationPref}', team='${opts.teamSizeBucket ?? "any"}', maxYears=${maxYears}, seniorTitlesDropped=${dropSeniorTitles}; ${yearsDropped} dropped by JD years gate, ${enrollmentDropped} dropped by active-enrollment gate)`,
   );
   if (candidates.length === 0) return [];
 

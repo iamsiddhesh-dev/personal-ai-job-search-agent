@@ -57,6 +57,7 @@ async function main() {
     name: merged.name,
     seniority: merged.seniority,
     yearsExperience: facts.yearsOfExperience,
+    isCurrentStudent: facts.isCurrentStudent,
     location: facts.location,
     skills: merged.skills,
     projects: merged.projects,

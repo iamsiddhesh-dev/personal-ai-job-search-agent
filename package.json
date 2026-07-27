@@ -17,11 +17,14 @@
     "test:phase6": "node --env-file=.env node_modules/tsx/dist/cli.mjs scripts/test-phase6.ts",
     "import-tracker": "node --env-file=.env node_modules/tsx/dist/cli.mjs scripts/import-tracker.ts",
     "export-tracker": "node --env-file=.env node_modules/tsx/dist/cli.mjs scripts/export-tracker.ts",
-    "link-tracker-jobs": "node --env-file=.env node_modules/tsx/dist/cli.mjs scripts/link-tracker-jobs.ts"
+    "link-tracker-jobs": "node --env-file=.env node_modules/tsx/dist/cli.mjs scripts/link-tracker-jobs.ts",
+    "migrate:lead-proof": "node --env-file=.env node_modules/tsx/dist/cli.mjs scripts/migrate-lead-proof.ts",
+    "migrate:llm-cache": "node --env-file=.env node_modules/tsx/dist/cli.mjs scripts/migrate-llm-cache.ts"
   },
   "dependencies": {
     "@ai-sdk/google": "^4.0.22",
     "@ai-sdk/groq": "^4.0.13",
+    "@ai-sdk/openai-compatible": "^3.0.14",
     "@react-three/drei": "^10.7.7",
     "@react-three/fiber": "^9.6.1",
     "@supabase/supabase-js": "^2.110.8",
