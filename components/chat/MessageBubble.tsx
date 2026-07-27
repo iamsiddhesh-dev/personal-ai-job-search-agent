@@ -19,8 +19,8 @@ export default function MessageBubble({ message }: { message: ChatMessage }) {
       <div
         className={`max-w-[78%] whitespace-pre-wrap rounded-[18px] px-3.5 py-2 text-[15px] leading-snug ${
           isAgent
-            ? "rounded-bl-[4px] bg-zinc-700 text-white"
-            : "rounded-br-[4px] bg-[#0b84ff] text-white"
+            ? "rounded-bl-[4px] bg-[var(--chat-agent-bg,#3f3f46)] text-white"
+            : "rounded-br-[4px] bg-[var(--chat-accent,#0b84ff)] text-white"
         }`}
       >
         {message.text}

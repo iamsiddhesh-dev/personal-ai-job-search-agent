@@ -8,56 +8,11 @@ import { AnimatePresence, motion } from "framer-motion";
 import { X } from "lucide-react";
 import { twMerge } from "tailwind-merge";
 import ConversationPanel from "@/components/chat/ConversationPanel";
+import { hash } from "@/lib/anim/hash";
+import { roundedRectPoint } from "@/lib/geometry/roundedRect";
 
 function cn(...classes: Array<string | false | null | undefined>) {
   return twMerge(classes.filter(Boolean).join(" "));
-}
-
-// Deterministic hash instead of Math.random() — render must stay pure, and
-// this only needs to look scattered, not be truly random.
-function hash(i: number): number {
-  const v = Math.sin(i * 12.9898) * 43758.5453;
-  return v - Math.floor(v);
-}
-
-// Maps a normalized perimeter position t∈[0,1) to an (x,y) point on a rounded
-// rectangle's edge (half-extents halfW/halfH, corner radius r), walking the
-// loop clockwise: top edge → TR corner → right edge → BR corner → bottom edge
-// → BL corner → left edge → TL corner.
-function roundedRectPoint(t: number, halfW: number, halfH: number, r: number): [number, number] {
-  const w = Math.max(halfW - r, 0);
-  const h = Math.max(halfH - r, 0);
-  const straightH = 2 * w;
-  const straightV = 2 * h;
-  const arc = (Math.PI / 2) * r;
-  const perimeter = 2 * straightH + 2 * straightV + 4 * arc || 1;
-  let d = (((t % 1) + 1) % 1) * perimeter;
-
-  if (d < straightH) return [-w + d, -halfH];
-  d -= straightH;
-  if (d < arc) {
-    const a = -Math.PI / 2 + (d / arc) * (Math.PI / 2);
-    return [w + r * Math.cos(a), -h + r * Math.sin(a)];
-  }
-  d -= arc;
-  if (d < straightV) return [halfW, -h + d];
-  d -= straightV;
-  if (d < arc) {
-    const a = 0 + (d / arc) * (Math.PI / 2);
-    return [w + r * Math.cos(a), h + r * Math.sin(a)];
-  }
-  d -= arc;
-  if (d < straightH) return [w - d, halfH];
-  d -= straightH;
-  if (d < arc) {
-    const a = Math.PI / 2 + (d / arc) * (Math.PI / 2);
-    return [-w + r * Math.cos(a), h + r * Math.sin(a)];
-  }
-  d -= arc;
-  if (d < straightV) return [-halfW, h - d];
-  d -= straightV;
-  const a = Math.PI + (d / arc) * (Math.PI / 2);
-  return [-w + r * Math.cos(a), -h + r * Math.sin(a)];
 }
 
 // Cross-section resolution (around the tube) and path resolution (around the

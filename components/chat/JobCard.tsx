@@ -75,8 +75,16 @@ export default function JobCard({ job }: { job: RankedMatch }) {
       </div>
 
       <div className="mt-2 text-[13px] leading-snug">
-        <span className="font-medium text-zinc-200">Lead with:</span> {job.leadProject}
+        <span className="font-medium text-zinc-200">
+          {job.leadProofType === "experience" ? "Lead with (experience):" : "Lead with (project):"}
+        </span>{" "}
+        {job.leadProof}
       </div>
+      {job.standoutProject && (
+        <div className="mt-1 text-[13px] leading-snug">
+          <span className="font-medium text-zinc-200">Also worth mentioning:</span> {job.standoutProject}
+        </div>
+      )}
       <div className="mt-1 text-[13px] leading-snug text-zinc-300">{job.rationale}</div>
       {job.gaps.length > 0 && (
         <div className="mt-1 text-[12px] leading-snug text-amber-400">Gaps: {job.gaps.join("; ")}</div>
@@ -88,7 +96,7 @@ export default function JobCard({ job }: { job: RankedMatch }) {
             href={job.applyUrl}
             target="_blank"
             rel="noopener noreferrer"
-            className="inline-block rounded-full bg-[#0b84ff] px-3.5 py-1.5 text-[13px] font-semibold text-white"
+            className="inline-block rounded-full bg-[var(--chat-accent,#0b84ff)] px-3.5 py-1.5 text-[13px] font-semibold text-white"
           >
             Apply →
           </a>
@@ -97,7 +105,7 @@ export default function JobCard({ job }: { job: RankedMatch }) {
           type="button"
           onClick={markApplied}
           disabled={applied || marking}
-          className="inline-block rounded-full bg-zinc-700 px-3.5 py-1.5 text-[13px] font-semibold text-zinc-100 disabled:opacity-60"
+          className="inline-block rounded-full bg-[var(--chat-field-bg,#3f3f46)] px-3.5 py-1.5 text-[13px] font-semibold text-zinc-100 disabled:opacity-60"
         >
           {applied ? "Applied ✓" : marking ? "Marking…" : "Mark applied"}
         </button>
@@ -106,7 +114,7 @@ export default function JobCard({ job }: { job: RankedMatch }) {
             type="button"
             onClick={() => (draftOpen ? setDraftOpen(false) : loadDrafts(false))}
             disabled={drafting}
-            className="inline-block rounded-full bg-zinc-700 px-3.5 py-1.5 text-[13px] font-semibold text-zinc-100 disabled:opacity-60"
+            className="inline-block rounded-full bg-[var(--chat-field-bg,#3f3f46)] px-3.5 py-1.5 text-[13px] font-semibold text-zinc-100 disabled:opacity-60"
           >
             {drafting ? "Writing…" : draftOpen ? "Hide drafts" : "Draft outreach"}
           </button>
@@ -168,7 +176,7 @@ function DraftBlock({
     <div className="rounded-xl bg-zinc-900/70 p-2.5">
       <div className="mb-1 flex items-center justify-between">
         <span className="text-[12px] font-semibold text-zinc-300">{label}</span>
-        <button type="button" onClick={copy} className="text-[12px] font-medium text-[#0b84ff]">
+        <button type="button" onClick={copy} className="text-[12px] font-medium text-[var(--chat-accent,#0b84ff)]">
           {copied ? "Copied ✓" : "Copy"}
         </button>
       </div>

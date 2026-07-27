@@ -1,9 +1,5 @@
-import LiquidChatButton from "@/components/LiquidChatButton";
+import HuntExperience from "@/components/hunt/HuntExperience";
 
-export default function ChatPage() {
-  return (
-    <div className="flex h-dvh w-full items-center justify-center bg-zinc-950">
-      <LiquidChatButton />
-    </div>
-  );
+export default function HomePage() {
+  return <HuntExperience />;
 }

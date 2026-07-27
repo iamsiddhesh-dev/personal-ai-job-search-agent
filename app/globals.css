@@ -12,6 +12,10 @@
   --font-mono: var(--font-geist-mono);
   --font-display: var(--font-cabinet-grotesk);
   --font-body: var(--font-ranade);
+  --font-hunt: var(--font-bespoke-slab);
+  --color-ink: #07070a;
+  --color-bone: #edeae3;
+  --color-seal: #c8372b;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -24,5 +28,101 @@
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-ranade);
+}
+
+@keyframes hunt-blade-sway {
+  0%,
+  100% {
+    transform: rotate(calc(var(--sway-deg, 4) * -1deg));
+  }
+  50% {
+    transform: rotate(calc(var(--sway-deg, 4) * 1deg));
+  }
+}
+
+@keyframes hunt-gust {
+  0%,
+  100% {
+    transform: rotate(-1.1deg);
+  }
+  50% {
+    transform: rotate(1.1deg);
+  }
+}
+
+/* Petals fall from above the viewport to below it, drifting sideways and
+   spinning. Translating in vh keeps the travel correct at any aspect ratio. */
+@keyframes hunt-petal-fall {
+  0% {
+    transform: translate3d(0, -12vh, 0) rotate(0deg);
+    opacity: 0;
+  }
+  8% {
+    opacity: 1;
+  }
+  90% {
+    opacity: 1;
+  }
+  100% {
+    transform: translate3d(var(--petal-drift, 60px), 112vh, 0) rotate(var(--petal-spin, 360deg));
+    opacity: 0;
+  }
+}
+
+/* Coherent gust across a whole grass layer, on top of each blade's own sway. */
+@keyframes hunt-wind {
+  0%,
+  100% {
+    transform: skewX(-1.1deg);
+  }
+  50% {
+    transform: skewX(1.1deg);
+  }
+}
+
+@keyframes hunt-mist-drift {
+  0%,
+  100% {
+    transform: translate3d(-3%, 0, 0) scale(1.04);
+    opacity: 0.5;
+  }
+  50% {
+    transform: translate3d(3%, -1.5%, 0) scale(1.1);
+    opacity: 0.85;
+  }
+}
+
+@keyframes hunt-ripple-breathe {
+  0%,
+  100% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.014);
+  }
+}
+
+@keyframes hunt-blossom-breathe {
+  0%,
+  100% {
+    transform: scale(1) rotate(0deg);
+    opacity: 0.85;
+  }
+  50% {
+    transform: scale(1.06) rotate(2deg);
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [style*="hunt-blade-sway"],
+  [style*="hunt-gust"],
+  [style*="hunt-blossom-breathe"],
+  [style*="hunt-ripple-breathe"],
+  [style*="hunt-petal-fall"],
+  [style*="hunt-wind"],
+  [style*="hunt-mist-drift"] {
+    animation: none !important;
+  }
 }

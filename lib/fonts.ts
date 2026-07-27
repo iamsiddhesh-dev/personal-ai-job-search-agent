@@ -22,3 +22,13 @@ export const ranade = localFont({
   variable: "--font-ranade",
   display: "swap",
 });
+
+export const bespokeSlab = localFont({
+  src: [
+    { path: "../fonts/BespokeSlab-Medium.woff2", weight: "500", style: "normal" },
+    { path: "../fonts/BespokeSlab-Bold.woff2", weight: "700", style: "normal" },
+    { path: "../fonts/BespokeSlab-Extrabold.woff2", weight: "800", style: "normal" },
+  ],
+  variable: "--font-bespoke-slab",
+  display: "swap",
+});
