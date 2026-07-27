@@ -98,7 +98,12 @@ export const matches = pgTable("matches", {
   jobId: uuid("job_id").notNull().references(() => jobs.id),
   score: real("score"),
   breakdown: jsonb("breakdown"),
-  leadProject: text("lead_project"),
+  // What to lead outreach with: real experience (job/internship) when the
+  // candidate has any relevant to the role, a project only when they don't.
+  // See lib/agent/match.ts's leadProof logic.
+  leadProof: text("lead_proof"),
+  leadProofType: text("lead_proof_type"), // 'experience' | 'project'
+  standoutProject: text("standout_project"), // nullable extra project worth mentioning
   gaps: text("gaps").array(),
   rationale: text("rationale"),
 });

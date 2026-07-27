@@ -19,9 +19,6 @@ function buildSummaryText(
   facts: Awaited<ReturnType<typeof parseResume>>["facts"],
 ): string {
   const parts: string[] = [];
-  for (const e of facts.experience) {
-    parts.push(`Experience: ${e.title} at ${e.company}${e.duration ? ` (${e.duration})` : ""} — ${e.summary}`);
-  }
   for (const ed of facts.education) {
     parts.push(`Education: ${ed.degree}, ${ed.institution}${ed.graduationYear ? ` (${ed.graduationYear})` : ""}`);
   }
@@ -48,6 +45,7 @@ async function main() {
     location: facts.location,
     skills: merged.skills,
     projects: merged.projects,
+    experience: facts.experience,
     embedding: merged.embedding,
     summaryText: buildSummaryText(facts),
   };
@@ -58,7 +56,7 @@ async function main() {
     roleFocus,
     locationPref,
     teamSizeBucket: "any",
-    finalLimit: 25,
+    maxResults: 25,
     log: (m) => console.log(m),
   });
   const secs = ((Date.now() - t0) / 1000).toFixed(1);
@@ -69,7 +67,7 @@ async function main() {
       `${String(i + 1).padStart(2)}. [${r.score}] ${r.title} @ ${r.company}` +
         `  (${r.location ?? "n/a"}${r.isRemote ? ", remote" : ""} · team ${r.teamSize ?? "?"} · ${r.ycBatch ?? "—"} · cos ${r.vectorScore.toFixed(2)} · ${r.hiringSignal})`,
     );
-    console.log(`    lead: ${r.leadProject}`);
+    console.log(`    lead (${r.leadProofType}): ${r.leadProof}${r.standoutProject ? `  [also: ${r.standoutProject}]` : ""}`);
     if (r.gaps.length) console.log(`    gaps: ${r.gaps.join("; ")}`);
     console.log(`    why:  ${r.rationale}`);
     console.log(`    apply: ${r.applyUrl ?? "n/a"}`);

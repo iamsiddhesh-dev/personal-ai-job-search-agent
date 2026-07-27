@@ -62,7 +62,9 @@ export async function POST(req: Request) {
   // Load the match, its job + company, and the profile behind its run.
   const [row] = await db
     .select({
-      leadProject: matches.leadProject,
+      leadProof: matches.leadProof,
+      leadProofType: matches.leadProofType,
+      standoutProject: matches.standoutProject,
       rationale: matches.rationale,
       gaps: matches.gaps,
       jobTitle: jobs.title,
@@ -96,12 +98,19 @@ export async function POST(req: Request) {
     technologies: p.technologies ?? [],
     url: p.url ?? null,
   }));
+  const experience = (facts?.experience ?? []).map((e) => ({
+    title: e.title,
+    company: e.company,
+    duration: e.duration,
+    summary: e.summary,
+  }));
 
   const profile: DraftProfile = {
     name: row.profileName ?? github?.name ?? null,
     githubUrl: github?.username ? `https://github.com/${github.username}` : null,
     headline: buildHeadline(facts, row.profileSeniority),
     projects,
+    experience,
   };
 
   let generated: OutreachDrafts;
@@ -116,7 +125,9 @@ export async function POST(req: Request) {
         applyUrl: row.jobApplyUrl,
       },
       {
-        leadProject: row.leadProject ?? (projects[0]?.name ?? "my project"),
+        leadProof: row.leadProof ?? (experience[0]?.title ?? projects[0]?.name ?? "my work"),
+        leadProofType: (row.leadProofType as "experience" | "project" | null) ?? (experience.length ? "experience" : "project"),
+        standoutProject: row.standoutProject ?? null,
         rationale: row.rationale ?? "",
         gaps: row.gaps ?? [],
       },

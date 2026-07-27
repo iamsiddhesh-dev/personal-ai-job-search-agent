@@ -30,11 +30,19 @@ export interface DraftProject {
   url?: string | null; // a real live/repo link, or null — never a placeholder
 }
 
+export interface DraftExperience {
+  title: string;
+  company: string;
+  duration: string | null;
+  summary: string;
+}
+
 export interface DraftProfile {
   name: string | null;
   githubUrl: string | null; // e.g. https://github.com/iamsiddhesh-dev
   headline: string | null; // one-line self-description, e.g. "2025 ECE grad (PICT Pune)…"
   projects: DraftProject[];
+  experience: DraftExperience[];
 }
 
 export interface DraftJob {
@@ -46,8 +54,10 @@ export interface DraftJob {
 }
 
 export interface DraftMatch {
-  leadProject: string; // exact name of one of the profile's real projects
-  rationale: string; // the specific product↔project overlap the matcher found
+  leadProof: string; // what to lead with — a job/internship title@company, or a project name
+  leadProofType: "experience" | "project";
+  standoutProject: string | null; // an extra project worth also mentioning, or null
+  rationale: string; // the specific overlap the matcher found
   gaps: string[];
 }
 
@@ -119,6 +129,13 @@ function projectsBlock(projects: DraftProject[]): string {
     .join("\n");
 }
 
+function experienceBlock(experience: DraftExperience[]): string {
+  if (!experience.length) return "  (no professional experience on file)";
+  return experience
+    .map((e) => `  - ${e.title} at ${e.company}${e.duration ? ` (${e.duration})` : ""}: ${e.summary}`)
+    .join("\n");
+}
+
 function buildPrompt(
   profile: DraftProfile,
   job: DraftJob,
@@ -136,6 +153,8 @@ CANDIDATE
 Name: ${profile.name ?? "unknown"} (address the recipient by their first name is not possible — you do not know it; open the email with "Hi there," and the DM with "Hi —").
 Self-description: ${profile.headline ?? "2025 ECE grad (PICT Pune) moving full-time into full-stack + AI engineering; ships fast."}
 GitHub: ${profile.githubUrl ?? "(none provided)"}
+Real professional experience (jobs/internships — you may ONLY reference these, never invent one):
+${experienceBlock(profile.experience)}
 Real projects (proof of work — you may ONLY reference these, never invent one):
 ${projectsBlock(profile.projects)}
 
@@ -149,23 +168,23 @@ ${desc}
 """
 
 WHY IT'S A FIT (found by the matcher — use this as the spine of the hook)
-Lead with this project: ${match.leadProject}
-The specific overlap: ${match.rationale}
+Lead with this ${match.leadProofType === "experience" ? "real experience" : "project"}: ${match.leadProof}
+${match.standoutProject ? `ALSO worth a brief mention (a standout project that strengthens the case beyond the lead): ${match.standoutProject}\n` : ""}The specific overlap: ${match.rationale}
 ${match.gaps.length ? `Known gaps (do NOT hide these, but do NOT dwell on them): ${match.gaps.join("; ")}` : ""}
 
 VOICE & STRUCTURE (from the candidate's own hand-written template — match it)
 Cold email:
-- Subject: "Built ${match.leadProject} — relevant to ${job.company}'s <their product area>" (fill in their real product area).
+- Subject: "${match.leadProofType === "experience" ? `Worked on ${match.leadProof}` : `Built ${match.leadProof}`} — relevant to ${job.company}'s <their product area>" (fill in their real product area).
 - Open "Hi there,".
 - Line 1: a REAL, specific hook — what ${job.company} is actually building, drawn only from the role details above. One sentence showing you understand what they do and for whom. Do NOT invent funding rounds, launches, or news you cannot see in the text above — a fabricated hook is worse than none.
-- Line 2: "I recently built ${match.leadProject} — <one line making the overlap with what they do explicit>." If (and only if) that project has a real link above, add "Live/code here: <the actual URL>." If it has no link, do not mention a link at all. Also point to the GitHub URL above if one exists.
+- Line 2: if leading with experience, "${`I worked on ${match.leadProof} — <one line making the overlap with what they do explicit>.`}" If leading with a project, "${`I recently built ${match.leadProof} — <one line making the overlap with what they do explicit>.`}" If (and only if) a relevant project has a real link above, add "Live/code here: <the actual URL>." If it has no link, do not mention a link at all. Also point to the GitHub URL above if one exists.${match.standoutProject ? ` If it strengthens the pitch, briefly also mention the project "${match.standoutProject}" — one short clause, not a second paragraph.` : ""}
 - Line 3: the "2025 ECE grad (PICT Pune), moving into full-stack + AI, ships fast" angle, and the role shape you're after (founding / forward-deployed / full-stack engineer, or intern — whichever fits this team).
 - Line 4: "Worth a 15-minute call? Happy to build a small POC against your product first if that's more useful." (This POC-first offer is the differentiator — keep it.)
 - Sign off "- Siddhesh".
 
 LinkedIn DM:
 - One message, ${LINKEDIN_MAX_CHARS} characters or fewer (it's sent as a connection-request note).
-- Open "Hi —". Name the project + the stack/domain overlap with ${job.company}, offer to prove it with a POC, mention 2025 grad, end with "Open to a quick chat?".
+- Open "Hi —". Name the lead ${match.leadProofType === "experience" ? "experience" : "project"} + the stack/domain overlap with ${job.company}, offer to prove it with a POC, mention 2025 grad, end with "Open to a quick chat?".
 
 HARD RULES
 - Output NO square-bracket placeholders. Every detail must be real and specific to ${job.company} and to ${profile.name ?? "the candidate"}'s actual projects. If you don't have a real value for something, rewrite the sentence so it isn't needed — never leave a "[...]" slot.
@@ -186,6 +205,7 @@ export async function generateDrafts(
   // retry; the loop is a safety net, not the expected path.
   for (let attempt = 0; attempt < 3; attempt++) {
     const drafts = await extractStructured({
+      task: "draftGeneration",
       prompt: buildPrompt(profile, job, match, corrections),
       schema: draftSchema,
     });

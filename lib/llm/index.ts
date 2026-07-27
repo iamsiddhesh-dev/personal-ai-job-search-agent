@@ -1,62 +1,194 @@
 // Single choke point for every LLM/embedding call in the app.
 //
-// - CHAT / structured extraction / re-rank -> Gemini Flash, with a Groq
-//   fallback on a quota/5xx error (Google cut free quotas 50-80% in Dec 2025
-//   with no notice, see REVISED-PLAN.md §3).
-// - EMBEDDINGS -> Cohere (embed-v4.0, 1024-dim). Gemini's free tier is 1,000/day
-//   and Voyage's no-card tier is 3 req/min (too fragile — any second consumer
-//   starves it). Cohere's free trial key needs no card and allows 2,000
-//   inputs/min, which warms the ~15k corpus in ~10min and tolerates concurrent
-//   use. Groq has no embedding endpoint, so it is NOT an option here.
+// Each caller names a TASK (not a model). Every task has its own ordered
+// fallback CHAIN of provider/model steps, picked for that task's
+// quality/latency/free-tier needs:
+//   - resumeExtraction — structured facts out of a raw resume. Cerebras
+//     gpt-oss-120b (fastest free-tier inference) -> Groq gpt-oss-120b ->
+//     Gemini Flash as a last resort.
+//   - hardening         — validates/corrects already-extracted facts (catches
+//     e.g. a job mislabeled as a project). Groq -> Cerebras -> Gemini.
+//   - rerank            — Stage 3 job matching, run in token-safe batches (see
+//     lib/agent/match.ts, which is what stops a Groq TPM cap from crashing the
+//     whole rerank again). Cerebras -> Groq -> Gemini.
+//   - draftGeneration   — outreach note text. Groq -> Cerebras -> Gemini.
+//
+// EMBEDDINGS -> Cohere (embed-v4.0, 1024-dim), unrelated to the task routing
+// above (Groq/Cerebras have no embedding endpoint).
 
 import { createGoogleGenerativeAI } from "@ai-sdk/google";
 import { createGroq } from "@ai-sdk/groq";
-import { generateObject } from "ai";
+import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
+import { generateObject, NoObjectGeneratedError, type LanguageModel } from "ai";
 import type { ZodTypeAny, z } from "zod";
 
 // The SDK's default providers read GOOGLE_GENERATIVE_AI_API_KEY / GROQ_API_KEY.
 // We name ours GEMINI_API_KEY (per .env.example) so wire it in explicitly.
 const google = createGoogleGenerativeAI({ apiKey: process.env.GEMINI_API_KEY });
 const groq = createGroq({ apiKey: process.env.GROQ_API_KEY });
+// Cerebras exposes an OpenAI-compatible endpoint (cloud.cerebras.ai, free,
+// no card). Optional: tasks that fall back to it just skip that hop when the
+// key is unset (see hasKey below).
+const cerebras = createOpenAICompatible({
+  name: "cerebras",
+  baseURL: "https://api.cerebras.ai/v1",
+  apiKey: process.env.CEREBRAS_API_KEY,
+});
 
 // "gemini-2.5-flash" was rejected live: "no longer available to new users"
 // for a freshly created API key (Google model lifecycle, not our bug — see
 // REVISED-PLAN.md §3 free-tier-quotas-move warning). Use the rolling alias so
 // this doesn't need touching again every time Google retires a pinned version.
+// IMPORTANT: every model named here MUST support enforced json_schema output,
+// and must be verified against a REAL schema from this codebase — a toy schema
+// proves nothing (a model that passes a flat 4-field probe can still score 0/3
+// on the resume schema).
+// Do NOT use groq's llama-3.3-70b-versatile / llama-3.1-8b-instant /
+// qwen3.6-27b here: they hard-fail with "does not support response format
+// `json_schema`" (only Groq's gpt-oss family supports it). That mistake broke
+// draft generation in production — re-verify with a probe before adding a model.
 const GEMINI_FLASH = "gemini-flash-latest";
-const GROQ_FALLBACK_MODEL = "openai/gpt-oss-120b";
+const GROQ_GPT_OSS_120B = "openai/gpt-oss-120b";
+// Cerebras' available model set varies by account/tier — gpt-oss-120b is what
+// this key has access to (verified via GET /v1/models); llama-3.3-70b 404'd.
+const CEREBRAS_GPT_OSS_120B = "gpt-oss-120b";
 
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+export type LlmTask = "resumeExtraction" | "hardening" | "rerank" | "draftGeneration";
+
+interface ModelStep {
+  provider: "google" | "groq" | "cerebras";
+  model: string;
+}
+
+// Each task gets an ordered CHAIN, tried top to bottom. Steps whose provider
+// has no key configured are skipped. A chain (rather than a single fallback)
+// means one provider's free-tier quota running dry degrades quality slightly
+// instead of failing the request.
+const TASK_ROUTES: Record<LlmTask, ModelStep[]> = {
+  resumeExtraction: [
+    { provider: "cerebras", model: CEREBRAS_GPT_OSS_120B },
+    { provider: "groq", model: GROQ_GPT_OSS_120B },
+    { provider: "google", model: GEMINI_FLASH },
+  ],
+  // Non-fatal by design (see hardenResumeFacts) — leads with Groq since it's
+  // the least quality-critical task.
+  hardening: [
+    { provider: "groq", model: GROQ_GPT_OSS_120B },
+    { provider: "cerebras", model: CEREBRAS_GPT_OSS_120B },
+    { provider: "google", model: GEMINI_FLASH },
+  ],
+  rerank: [
+    { provider: "cerebras", model: CEREBRAS_GPT_OSS_120B },
+    { provider: "groq", model: GROQ_GPT_OSS_120B },
+    { provider: "google", model: GEMINI_FLASH },
+  ],
+  draftGeneration: [
+    { provider: "groq", model: GROQ_GPT_OSS_120B },
+    { provider: "cerebras", model: CEREBRAS_GPT_OSS_120B },
+    { provider: "google", model: GEMINI_FLASH },
+  ],
+};
+
+function resolveModel(step: ModelStep): LanguageModel {
+  switch (step.provider) {
+    case "google":
+      return google(step.model);
+    case "groq":
+      return groq(step.model);
+    case "cerebras":
+      return cerebras(step.model);
+  }
+}
 
 function looksLikeQuotaOrServerError(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err);
   return /429|quota|rate.?limit|RESOURCE_EXHAUSTED|5\d\d/i.test(msg);
 }
 
-// Structured extraction (resume facts, profile merge, job re-rank). Gemini
-// Flash first; falls back to Groq's OpenAI-compatible endpoint only on a
-// quota/server error, never on a validation error (that's a prompt bug, not
-// an outage).
+// Reasons to move to the next step in a chain: a quota/server outage, or the
+// model failing to produce schema-valid output. The latter can mean a genuine
+// prompt bug, but it also happens when a model doesn't truly enforce
+// json_schema — so retrying on the next provider is the right call. If it IS a
+// prompt bug, every step fails and the last error surfaces.
+function shouldFailOver(err: unknown): boolean {
+  if (looksLikeQuotaOrServerError(err) || NoObjectGeneratedError.isInstance(err)) return true;
+  // Groq's strict json_schema mode returns a 400 "Failed to validate JSON" when
+  // the model can't satisfy the schema. Like NoObjectGeneratedError that's a
+  // capability limit rather than a bad request, so another model deserves a go.
+  const msg = err instanceof Error ? err.message : String(err);
+  return /failed to validate json|failed_generation|does not support response format/i.test(msg);
+}
+
+// Providers state how long to wait in the error text ("Please retry in 24.02s",
+// "try again in 1m30s"). Honor it when present so we wait the real amount
+// rather than a guess; cap it so a long daily-quota reset doesn't hang a
+// request that could just move to the next provider.
+function retryAfterMs(err: unknown): number {
+  const msg = err instanceof Error ? err.message : String(err);
+  const m = msg.match(/(?:retry|try again) in\s*(?:(\d+)m)?\s*([\d.]+)s/i);
+  if (m) {
+    const mins = m[1] ? Number(m[1]) : 0;
+    const secs = Number(m[2]);
+    const total = (mins * 60 + secs) * 1000;
+    if (Number.isFinite(total)) return Math.min(total + 250, 20000);
+  }
+  return 3000;
+}
+
+function hasKey(provider: ModelStep["provider"]): boolean {
+  switch (provider) {
+    case "google":
+      return !!process.env.GEMINI_API_KEY;
+    case "groq":
+      return !!process.env.GROQ_API_KEY;
+    case "cerebras":
+      return !!process.env.CEREBRAS_API_KEY;
+  }
+}
+
+// Structured generation, routed by task. Walks the task's chain in order,
+// skipping steps whose provider has no key, and moving on when a step fails in
+// a retryable way. A non-retryable error (e.g. a malformed prompt) throws
+// immediately rather than burning the rest of the chain.
 export async function extractStructured<S extends ZodTypeAny>(params: {
+  task: LlmTask;
   prompt: string;
   schema: S;
 }): Promise<z.infer<S>> {
-  try {
-    const { object } = await generateObject({
-      model: google(GEMINI_FLASH),
-      schema: params.schema,
-      prompt: params.prompt,
-    });
-    return object as z.infer<S>;
-  } catch (err) {
-    if (!looksLikeQuotaOrServerError(err)) throw err;
-    const { object } = await generateObject({
-      model: groq(GROQ_FALLBACK_MODEL),
-      schema: params.schema,
-      prompt: params.prompt,
-    });
-    return object as z.infer<S>;
+  const chain = TASK_ROUTES[params.task].filter((step) => hasKey(step.provider));
+  if (chain.length === 0) {
+    throw new Error(
+      `No API key configured for any provider in the "${params.task}" chain. Set GEMINI_API_KEY, GROQ_API_KEY, or CEREBRAS_API_KEY.`,
+    );
   }
+
+  let lastErr: unknown;
+  for (let i = 0; i < chain.length; i++) {
+    const step = chain[i];
+    const isLastStep = i === chain.length - 1;
+    // A per-minute token/request cap is transient — waiting clears it. Retry
+    // the same step before advancing, otherwise a brief burst would burn
+    // through the whole chain and land on Gemini, whose free tier is only 20
+    // requests per DAY and must be conserved.
+    const attempts = isLastStep ? 1 : 2;
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      try {
+        const { object } = await generateObject({
+          model: resolveModel(step),
+          schema: params.schema,
+          prompt: params.prompt,
+        });
+        return object as z.infer<S>;
+      } catch (err) {
+        lastErr = err;
+        if (!shouldFailOver(err)) throw err;
+        const retryable = looksLikeQuotaOrServerError(err) && attempt < attempts - 1;
+        if (!retryable) break;
+        await sleep(retryAfterMs(err));
+      }
+    }
+  }
+  throw lastErr;
 }
 
 // --- Embeddings (Cohere) -----------------------------------------------------
@@ -81,6 +213,8 @@ type InputType = "query" | "document";
 interface CohereResponse {
   embeddings: { float: number[][] };
 }
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 async function cohereEmbedBatch(texts: string[], inputType: InputType): Promise<number[][]> {
   const maxRetries = 6;
