@@ -1,14 +1,13 @@
 // Single choke point for every LLM/embedding call in the app.
 //
-// Each caller names a TASK (not a model). Every task has its own ordered
-// fallback CHAIN of provider/model steps, picked for that task's
-// quality/latency/free-tier needs:
+// Each caller names a TASK (not a model). Every task has its own primary +
+// fallback provider/model pair, picked for that task's quality/latency/free-tier
+// needs (see REVISED-PLAN.md §3 and the per-task table in the repo notes):
 //   - resumeExtraction — structured facts out of a raw resume. Cerebras
-//     gpt-oss-120b (fastest free-tier inference) -> Groq gpt-oss-120b ->
-//     Gemini Flash as a last resort.
+//     gpt-oss-120b (fastest free-tier inference) -> Groq -> Gemini Flash last.
 //   - hardening         — validates/corrects already-extracted facts (catches
 //     e.g. a job mislabeled as a project). Groq -> Cerebras -> Gemini.
-//   - rerank            — Stage 3 job matching, run in token-safe batches (see
+//   - rerank            — Stage 3 job matching. Run in token-safe batches (see
 //     lib/agent/match.ts, which is what stops a Groq TPM cap from crashing the
 //     whole rerank again). Cerebras -> Groq -> Gemini.
 //   - draftGeneration   — outreach note text. Groq -> Cerebras -> Gemini.
@@ -21,19 +20,73 @@ import { createGroq } from "@ai-sdk/groq";
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import { generateObject, NoObjectGeneratedError, type LanguageModel } from "ai";
 import type { ZodTypeAny, z } from "zod";
+import { readCache, writeCache } from "./cache";
 
-// The SDK's default providers read GOOGLE_GENERATIVE_AI_API_KEY / GROQ_API_KEY.
-// We name ours GEMINI_API_KEY (per .env.example) so wire it in explicitly.
-const google = createGoogleGenerativeAI({ apiKey: process.env.GEMINI_API_KEY });
-const groq = createGroq({ apiKey: process.env.GROQ_API_KEY });
-// Cerebras exposes an OpenAI-compatible endpoint (cloud.cerebras.ai, free,
-// no card). Optional: tasks that fall back to it just skip that hop when the
-// key is unset (see hasKey below).
-const cerebras = createOpenAICompatible({
-  name: "cerebras",
-  baseURL: "https://api.cerebras.ai/v1",
-  apiKey: process.env.CEREBRAS_API_KEY,
-});
+// --- Multi-key pools ---------------------------------------------------------
+// Free-tier caps are PER KEY (per account), so the single highest-leverage
+// scaling knob is more keys from separate accounts: 3 Groq keys is 3x the
+// tokens-per-minute, 3 Gemini keys is 3x the (tiny) 20-requests-per-day.
+//
+// Each provider reads a comma-separated list, falling back to the original
+// single-key name so existing .env files keep working:
+//   GROQ_API_KEYS=key1,key2,key3     (or GROQ_API_KEY=key1)
+//   GEMINI_API_KEYS=...              (or GEMINI_API_KEY=...)
+//   CEREBRAS_API_KEYS=...            (or CEREBRAS_API_KEY=...)
+type ProviderName = "google" | "groq" | "cerebras";
+
+const KEY_ENV: Record<ProviderName, [plural: string, singular: string]> = {
+  google: ["GEMINI_API_KEYS", "GEMINI_API_KEY"],
+  groq: ["GROQ_API_KEYS", "GROQ_API_KEY"],
+  cerebras: ["CEREBRAS_API_KEYS", "CEREBRAS_API_KEY"],
+};
+
+function keysFor(provider: ProviderName): string[] {
+  const [plural, singular] = KEY_ENV[provider];
+  const raw = `${process.env[plural] ?? ""},${process.env[singular] ?? ""}`;
+  // De-duplicate so listing the same key in both vars doesn't waste an attempt.
+  return [...new Set(raw.split(",").map((k) => k.trim()).filter(Boolean))];
+}
+
+// Provider clients are keyed by API key so each key gets its own client, built
+// once and reused across requests.
+const clientCache = new Map<string, (model: string) => LanguageModel>();
+
+function clientFor(provider: ProviderName, apiKey: string): (model: string) => LanguageModel {
+  const cacheKey = `${provider}:${apiKey}`;
+  let client = clientCache.get(cacheKey);
+  if (!client) {
+    client =
+      provider === "google"
+        ? createGoogleGenerativeAI({ apiKey })
+        : provider === "groq"
+          ? createGroq({ apiKey })
+          : // Cerebras exposes an OpenAI-compatible endpoint (cloud.cerebras.ai).
+            // supportsStructuredOutputs is REQUIRED: without it the compat
+            // provider downgrades to `response_format: json_object` and merely
+            // describes the schema in the prompt, which the model then fails to
+            // follow on anything non-trivial (measured 0/3 on our real
+            // schemas). Cerebras does accept strict `json_schema` natively —
+            // verified against the raw REST API — and scores reliably with it.
+            createOpenAICompatible({
+              name: "cerebras",
+              baseURL: "https://api.cerebras.ai/v1",
+              apiKey,
+              supportsStructuredOutputs: true,
+            });
+    clientCache.set(cacheKey, client);
+  }
+  return client;
+}
+
+// Rotating start offset per provider, so consecutive requests don't all hammer
+// key #1 and leave the rest idle. Advanced once per call, not per retry.
+const rotation: Record<ProviderName, number> = { google: 0, groq: 0, cerebras: 0 };
+
+function nextStart(provider: ProviderName, keyCount: number): number {
+  const i = rotation[provider] % keyCount;
+  rotation[provider] = (rotation[provider] + 1) % keyCount;
+  return i;
+}
 
 // "gemini-2.5-flash" was rejected live: "no longer available to new users"
 // for a freshly created API key (Google model lifecycle, not our bug — see
@@ -49,6 +102,9 @@ const cerebras = createOpenAICompatible({
 // draft generation in production — re-verify with a probe before adding a model.
 const GEMINI_FLASH = "gemini-flash-latest";
 const GROQ_GPT_OSS_120B = "openai/gpt-oss-120b";
+// NOTE: groq's gpt-oss-20b is deliberately unused. It is faster but scored only
+// 2/3 on the real rerank schema, and a silent quality drop is worse than a
+// slightly slower correct answer.
 // Cerebras' available model set varies by account/tier — gpt-oss-120b is what
 // this key has access to (verified via GET /v1/models); llama-3.3-70b 404'd.
 const CEREBRAS_GPT_OSS_120B = "gpt-oss-120b";
@@ -56,7 +112,7 @@ const CEREBRAS_GPT_OSS_120B = "gpt-oss-120b";
 export type LlmTask = "resumeExtraction" | "hardening" | "rerank" | "draftGeneration";
 
 interface ModelStep {
-  provider: "google" | "groq" | "cerebras";
+  provider: ProviderName;
   model: string;
 }
 
@@ -88,17 +144,6 @@ const TASK_ROUTES: Record<LlmTask, ModelStep[]> = {
     { provider: "google", model: GEMINI_FLASH },
   ],
 };
-
-function resolveModel(step: ModelStep): LanguageModel {
-  switch (step.provider) {
-    case "google":
-      return google(step.model);
-    case "groq":
-      return groq(step.model);
-    case "cerebras":
-      return cerebras(step.model);
-  }
-}
 
 function looksLikeQuotaOrServerError(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err);
@@ -135,56 +180,75 @@ function retryAfterMs(err: unknown): number {
   return 3000;
 }
 
-function hasKey(provider: ModelStep["provider"]): boolean {
-  switch (provider) {
-    case "google":
-      return !!process.env.GEMINI_API_KEY;
-    case "groq":
-      return !!process.env.GROQ_API_KEY;
-    case "cerebras":
-      return !!process.env.CEREBRAS_API_KEY;
-  }
-}
-
-// Structured generation, routed by task. Walks the task's chain in order,
-// skipping steps whose provider has no key, and moving on when a step fails in
-// a retryable way. A non-retryable error (e.g. a malformed prompt) throws
-// immediately rather than burning the rest of the chain.
+// Structured generation, routed by task.
+//
+// Two nested loops, in this order deliberately:
+//   1. model steps  — the task's chain, best-fit model first.
+//   2. API keys     — every key for that step's provider.
+// Keys are the INNER loop because a rate limit is per key: when key #1 is
+// throttled, key #2 on another account is unaffected and answers immediately,
+// which is far better than degrading to a weaker model. Only when every key for
+// a provider is exhausted do we drop to the next model.
+//
+// A non-retryable error (e.g. a genuinely malformed prompt) throws at once
+// rather than burning the whole matrix.
+//
+// cacheTtlMs, when set, checks/writes a DB cache keyed on (task, sha256 of the
+// exact prompt) before/after the chain — see lib/llm/cache.ts for why this
+// exists instead of more API keys. Omit it for prompts that are expected to
+// differ every call (e.g. draft generation's correction-retry loop), where a
+// cache would never hit and is pure overhead.
 export async function extractStructured<S extends ZodTypeAny>(params: {
   task: LlmTask;
   prompt: string;
   schema: S;
+  cacheTtlMs?: number;
 }): Promise<z.infer<S>> {
-  const chain = TASK_ROUTES[params.task].filter((step) => hasKey(step.provider));
+  if (params.cacheTtlMs) {
+    const cached = await readCache(params.task, params.prompt, params.cacheTtlMs);
+    // Re-validate through the current zod schema rather than trusting the
+    // stored shape blindly — guards against a schema change since the row was
+    // written.
+    if (cached) {
+      const parsed = params.schema.safeParse(cached);
+      if (parsed.success) return parsed.data as z.infer<S>;
+    }
+  }
+
+  const chain = TASK_ROUTES[params.task]
+    .map((step) => ({ step, keys: keysFor(step.provider) }))
+    .filter(({ keys }) => keys.length > 0);
+
   if (chain.length === 0) {
     throw new Error(
-      `No API key configured for any provider in the "${params.task}" chain. Set GEMINI_API_KEY, GROQ_API_KEY, or CEREBRAS_API_KEY.`,
+      `No API key configured for any provider in the "${params.task}" chain. Set GROQ_API_KEYS, GEMINI_API_KEYS, or CEREBRAS_API_KEYS (comma-separated).`,
     );
   }
 
   let lastErr: unknown;
-  for (let i = 0; i < chain.length; i++) {
-    const step = chain[i];
-    const isLastStep = i === chain.length - 1;
-    // A per-minute token/request cap is transient — waiting clears it. Retry
-    // the same step before advancing, otherwise a brief burst would burn
-    // through the whole chain and land on Gemini, whose free tier is only 20
-    // requests per DAY and must be conserved.
-    const attempts = isLastStep ? 1 : 2;
-    for (let attempt = 0; attempt < attempts; attempt++) {
+  for (const { step, keys } of chain) {
+    const start = nextStart(step.provider, keys.length);
+    for (let n = 0; n < keys.length; n++) {
+      const apiKey = keys[(start + n) % keys.length];
       try {
         const { object } = await generateObject({
-          model: resolveModel(step),
+          model: clientFor(step.provider, apiKey)(step.model),
           schema: params.schema,
           prompt: params.prompt,
         });
+        if (params.cacheTtlMs) await writeCache(params.task, params.prompt, object);
         return object as z.infer<S>;
       } catch (err) {
         lastErr = err;
         if (!shouldFailOver(err)) throw err;
-        const retryable = looksLikeQuotaOrServerError(err) && attempt < attempts - 1;
-        if (!retryable) break;
-        await sleep(retryAfterMs(err));
+        // Only pause when there is nothing else to try for this provider —
+        // rotating to a fresh key clears a per-key rate limit instantly, so
+        // sleeping first would waste that time for nothing.
+        const isLastKeyOfLastStep =
+          n === keys.length - 1 && step === chain[chain.length - 1].step;
+        if (n === keys.length - 1 && !isLastKeyOfLastStep && looksLikeQuotaOrServerError(err)) {
+          await sleep(retryAfterMs(err));
+        }
       }
     }
   }

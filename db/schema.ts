@@ -108,6 +108,23 @@ export const matches = pgTable("matches", {
   rationale: text("rationale"),
 });
 
+// Result cache for lib/llm's extractStructured, keyed on (task, hash of the
+// exact prompt sent). Free-tier keys can't be multiplied across accounts
+// (ToS/ban risk — same-person, same-IP signups are exactly what providers
+// watch for), so making a fixed quota go further by never re-paying for
+// identical work is the safe lever instead. See lib/llm/cache.ts.
+export const llmCache = pgTable(
+  "llm_cache",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    task: text("task").notNull(),
+    promptHash: text("prompt_hash").notNull(),
+    result: jsonb("result").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [unique("llm_cache_task_hash_unique").on(t.task, t.promptHash)],
+);
+
 export const applications = pgTable("applications", {
   id: uuid("id").primaryKey().defaultRandom(),
   userId: uuid("user_id").notNull().references(() => users.id),
