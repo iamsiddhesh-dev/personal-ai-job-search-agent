@@ -8,12 +8,12 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import { getOrCreateSingleUser } from "@/lib/user";
+import { getScriptUser } from "@/lib/user";
 import { listApplications } from "@/lib/applications";
 import { buildXlsx } from "@/lib/xlsx-export";
 
 async function main() {
-  const userId = await getOrCreateSingleUser();
+  const userId = await getScriptUser();
   const rows = await listApplications(userId);
 
   const headers = ["Company", "Role", "Status", "Applied at", "Next follow-up", "Apply URL", "Notes"];

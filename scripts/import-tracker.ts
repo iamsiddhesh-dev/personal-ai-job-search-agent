@@ -15,7 +15,7 @@ import path from "node:path";
 import { db } from "@/lib/db";
 import { applications } from "@/db/schema";
 import { and, eq } from "drizzle-orm";
-import { getOrCreateSingleUser } from "@/lib/user";
+import { getScriptUser } from "@/lib/user";
 import { importOutreachRow } from "@/lib/applications";
 
 interface TrackerRow {
@@ -98,7 +98,7 @@ async function main() {
   const rows = readTrackerRows(xlsxPath);
   console.log(`Parsed ${rows.length} rows from ${xlsxPath}`);
 
-  const userId = await getOrCreateSingleUser();
+  const userId = await getScriptUser();
 
   let imported = 0;
   let skipped = 0;

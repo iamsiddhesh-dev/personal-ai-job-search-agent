@@ -1,12 +1,9 @@
-import { db } from "@/lib/db";
-import { profiles } from "@/db/schema";
-import { eq } from "drizzle-orm";
-import { getOrCreateSingleUser } from "@/lib/user";
+import { getOrCreateUser } from "@/lib/user";
 import { uploadResume } from "@/lib/storage";
 import { parseResume, detectResumeKind } from "@/lib/profile/resume";
 import { fetchGithubProfile, parseGithubUsername } from "@/lib/profile/github";
 import { parseLinkedinInput } from "@/lib/profile/linkedin";
-import { mergeProfile } from "@/lib/profile/merge";
+import { saveProfile } from "@/lib/profile/save";
 
 const MAX_RESUME_BYTES = 5 * 1024 * 1024;
 
@@ -31,7 +28,7 @@ export async function POST(req: Request) {
     );
   }
 
-  const userId = await getOrCreateSingleUser();
+  const userId = await getOrCreateUser();
   const notes: string[] = [];
 
   let resumePath: string | null = null;
@@ -84,37 +81,17 @@ export async function POST(req: Request) {
     if (result.note) notes.push(result.note);
   }
 
-  const merged = await mergeProfile({ resumeFacts, github, linkedinText, portfolioUrl: portfolioUrl ?? undefined });
-
-  const profileName = name ?? merged.name;
-  const values = {
-    userId,
-    name: profileName,
-    resumePath,
-    resumeFilename,
-    resumeUploadedAt: resumePath ? new Date() : null,
-    resumeText,
-    resumeFacts,
-    github,
-    linkedinText,
-    portfolioUrl: portfolioUrl ?? null,
-    skills: merged.skills,
-    projects: merged.projects,
-    seniority: merged.seniority,
-    embedding: merged.embedding,
-  };
-
-  const [existing] = await db.select({ id: profiles.id }).from(profiles).where(eq(profiles.userId, userId)).limit(1);
-
-  const profileId = existing
-    ? (await db.update(profiles).set(values).where(eq(profiles.id, existing.id)).returning({ id: profiles.id }))[0].id
-    : (await db.insert(profiles).values(values).returning({ id: profiles.id }))[0].id;
-
-  return Response.json({
-    profileId,
-    playback: merged.playback,
-    notes,
+  // Only pass what this request actually carried — saveProfile merges against
+  // the stored row, so omitting a field keeps it rather than clearing it.
+  const { profileId, playback, canSearch } = await saveProfile(userId, {
+    name,
+    ...(hasResume ? { resumePath, resumeFilename, resumeText, resumeFacts } : {}),
+    ...(hasGithub ? { github } : {}),
+    ...(hasLinkedin ? { linkedinText } : {}),
+    ...(portfolioUrl ? { portfolioUrl } : {}),
   });
+
+  return Response.json({ profileId, playback, notes, canSearch });
 }
 
 function asString(value: FormDataEntryValue | null): string | null {

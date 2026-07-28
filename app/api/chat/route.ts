@@ -3,7 +3,8 @@
 // /api/run already uses, so the client parses both the same way.
 //
 // Events: {type:"status"} while a tool works, {type:"jobs"} for result cards,
-// {type:"text"} for the agent's reply, {type:"error"} if the turn fails.
+// {type:"meme"} for a reaction image, {type:"text"} for the agent's reply,
+// {type:"error"} if the turn fails.
 //
 // Stateless by design: the client owns the thread and sends it each turn, so a
 // conversation is never "finished" server-side and can continue indefinitely.
@@ -11,9 +12,12 @@
 import type { ModelMessage } from "ai";
 import { runChatTurn, type AgentEvent } from "@/lib/chat/agent";
 import { summarizeTurns } from "@/lib/chat/summarize";
+import { getOrCreateUser } from "@/lib/user";
 
 interface ChatRequest {
   messages?: { role: "user" | "assistant"; content: string }[];
+  // Curated meme ids the client has already been shown this conversation.
+  recentMemeIds?: string[];
 }
 
 // The client resends the WHOLE thread every turn (server is stateless), but
@@ -54,13 +58,18 @@ export async function POST(req: Request) {
     history = asModelMessages(incoming);
   }
 
+  // Resolved before the stream opens: getOrCreateUser may set the identity
+  // cookie, and HTTP won't accept a Set-Cookie once the body starts streaming.
+  const userId = await getOrCreateUser();
+  const recentMemeIds = (body.recentMemeIds ?? []).filter((id) => typeof id === "string");
+
   const encoder = new TextEncoder();
   const stream = new ReadableStream({
     async start(controller) {
       const send = (event: AgentEvent) =>
         controller.enqueue(encoder.encode(JSON.stringify(event) + "\n"));
       try {
-        const { text } = await runChatTurn(history, send, summary);
+        const { text } = await runChatTurn({ history, emit: send, userId, summary, recentMemeIds });
         // The agent occasionally finishes a tool call with nothing left to say;
         // an empty bubble would look like a bug, so give it a nudge line.
         send({ type: "text", message: text || "…what else can i dig into?" });

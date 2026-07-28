@@ -1,10 +1,10 @@
-import { getOrCreateSingleUser } from "@/lib/user";
+import { getOrCreateUser } from "@/lib/user";
 import { listApplications, listDueFollowups, markApplied, bumpSent } from "@/lib/applications";
 
 // GET /api/applications           -> full tracker list (follow-ups auto-advanced)
 // GET /api/applications?due=true  -> only rows due for a follow-up right now
 export async function GET(req: Request) {
-  const userId = await getOrCreateSingleUser();
+  const userId = await getOrCreateUser();
   const due = new URL(req.url).searchParams.get("due") === "true";
   const rows = due ? await listDueFollowups(userId) : await listApplications(userId);
   return Response.json({ applications: rows });
@@ -23,7 +23,7 @@ export async function POST(req: Request) {
   if (!body.jobId && !body.companyName) {
     return Response.json({ error: "jobId or companyName is required." }, { status: 400 });
   }
-  const userId = await getOrCreateSingleUser();
+  const userId = await getOrCreateUser();
   const id = await markApplied({
     userId,
     jobId: body.jobId ?? null,

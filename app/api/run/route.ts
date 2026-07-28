@@ -3,7 +3,7 @@ import { profiles } from "@/db/schema";
 import { eq } from "drizzle-orm";
 import { runMatch, type LocationPref, type TeamSizeBucket } from "@/lib/agent/match";
 import { buildMatchProfileFromRow } from "@/lib/agent/build-profile";
-import { getOrCreateSingleUser } from "@/lib/user";
+import { getOrCreateUser } from "@/lib/user";
 import { getExcludedJobIds } from "@/lib/applications";
 import { persistRun } from "@/lib/agent/persist";
 
@@ -31,6 +31,10 @@ export async function POST(req: Request) {
     return Response.json({ error: "Profile not found." }, { status: 404 });
   }
 
+  // Resolved here, not inside start(): getOrCreateUser may set the identity
+  // cookie, and once the stream begins the response headers are already gone.
+  const userId = await getOrCreateUser();
+
   const encoder = new TextEncoder();
   const stream = new ReadableStream({
     async start(controller) {
@@ -38,7 +42,6 @@ export async function POST(req: Request) {
       try {
         const matchProfile = buildMatchProfileFromRow(row);
         send({ type: "status", message: "Building your profile vector…" });
-        const userId = await getOrCreateSingleUser();
         const excludeJobIds = await getExcludedJobIds(userId);
         const results = await runMatch(matchProfile, {
           roleFocus,

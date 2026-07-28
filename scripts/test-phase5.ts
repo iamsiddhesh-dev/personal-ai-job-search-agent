@@ -12,10 +12,11 @@ import { parseResume } from "@/lib/profile/resume";
 import { fetchGithubProfile } from "@/lib/profile/github";
 import { mergeProfile } from "@/lib/profile/merge";
 import { runMatch, type MatchProfile } from "@/lib/agent/match";
-import { getOrCreateSingleUser } from "@/lib/user";
+import { getScriptUser } from "@/lib/user";
 import { markApplied, getExcludedJobIds, listDueFollowups, listApplications, bumpSent } from "@/lib/applications";
 
-const GITHUB_HANDLE = "iamsiddhesh-dev";
+const GITHUB_HANDLE = process.env.GITHUB_USERNAME ?? "";
+if (!GITHUB_HANDLE) throw new Error("Set GITHUB_USERNAME in .env to run this script.");
 const FIXTURE = join(process.cwd(), "tests", "fixtures", "resume.pdf");
 
 async function main() {
@@ -37,7 +38,7 @@ async function main() {
     summaryText: "",
   };
 
-  const userId = await getOrCreateSingleUser();
+  const userId = await getScriptUser();
   const searchOpts = { roleFocus: "any", locationPref: "anywhere" as const, teamSizeBucket: "any" as const };
 
   console.log("\n=== Search #1 (baseline, no exclusions) ===");
