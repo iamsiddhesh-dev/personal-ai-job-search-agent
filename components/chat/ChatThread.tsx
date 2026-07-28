@@ -19,7 +19,7 @@ export default function ChatThread({
   }, [messages, isTyping]);
 
   return (
-    <div className="flex-1 space-y-2.5 overflow-y-auto overscroll-contain py-3">
+    <div className="scroll-slim flex-1 space-y-2.5 overflow-y-auto overscroll-contain py-3">
       {messages.map((m) => (
         <MessageBubble key={m.id} message={m} />
       ))}

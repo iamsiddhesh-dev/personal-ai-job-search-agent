@@ -31,6 +31,34 @@ body {
   font-family: var(--font-ranade);
 }
 
+/* Slim scrollbar for the chat thread and composer. The OS default is a wide
+   opaque gutter that reads as a system widget bolted onto the panel; this is a
+   thin floating line instead. Both declarations are needed — `scrollbar-width`
+   covers Firefox and the standard, `::-webkit-scrollbar` covers Chromium and
+   Safari, and neither one alone reaches every browser. */
+.scroll-slim {
+  scrollbar-width: thin;
+  scrollbar-color: rgb(255 255 255 / 0.18) transparent;
+}
+
+.scroll-slim::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+.scroll-slim::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.scroll-slim::-webkit-scrollbar-thumb {
+  background: rgb(255 255 255 / 0.18);
+  border-radius: 999px;
+}
+
+.scroll-slim::-webkit-scrollbar-thumb:hover {
+  background: rgb(255 255 255 / 0.32);
+}
+
 @keyframes hunt-blade-sway {
   0%,
   100% {
