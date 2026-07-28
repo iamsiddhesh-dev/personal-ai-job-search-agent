@@ -20,7 +20,8 @@ import { db } from "@/lib/db";
 import { jobs } from "@/db/schema";
 import { eq } from "drizzle-orm";
 
-const GITHUB_HANDLE = "iamsiddhesh-dev";
+const GITHUB_HANDLE = process.env.GITHUB_USERNAME ?? "";
+if (!GITHUB_HANDLE) throw new Error("Set GITHUB_USERNAME in .env to run this script.");
 const FIXTURE = join(process.cwd(), "tests", "fixtures", "resume.pdf");
 const N_DRAFTS = 3; // distinct companies to draft for
 

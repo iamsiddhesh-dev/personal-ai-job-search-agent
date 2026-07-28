@@ -1,6 +1,6 @@
 // Phase 3 exit test (REVISED-PLAN §8): build the real profile from the fixture
 // resume + GitHub, run the matching engine, print 25 ranked jobs for a by-eye
-// judgment — would Siddhesh actually apply, and are the rationales SPECIFIC?
+// judgment — would the candidate actually apply, and are the rationales SPECIFIC?
 //
 // Run: npm run test:phase3            (defaults role=full-stack, loc=india)
 //      npm run test:phase3 ai remote  (role, location override via argv)
@@ -12,7 +12,8 @@ import { fetchGithubProfile } from "@/lib/profile/github";
 import { mergeProfile } from "@/lib/profile/merge";
 import { runMatch, type MatchProfile, type LocationPref } from "@/lib/agent/match";
 
-const GITHUB_HANDLE = "iamsiddhesh-dev";
+const GITHUB_HANDLE = process.env.GITHUB_USERNAME ?? "";
+if (!GITHUB_HANDLE) throw new Error("Set GITHUB_USERNAME in .env to run this script.");
 const FIXTURE = join(process.cwd(), "tests", "fixtures", "resume.pdf");
 
 function buildSummaryText(

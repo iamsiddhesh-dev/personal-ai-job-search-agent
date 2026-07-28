@@ -98,13 +98,16 @@ function buildPlayback(params: {
     );
   }
   if (skills.length) lines.push(`Skills I picked up: ${skills.slice(0, 10).join(", ")}${skills.length > 10 ? ", …" : ""}.`);
+  // Independent/contract work reads as a gap on a resume when it's really the
+  // opposite — someone found clients and delivered. Say so up front, so the
+  // candidate knows it won't be treated as missing time.
   if (resumeFacts?.experience?.length) {
-    const nonEngineering = resumeFacts.experience.filter((e) =>
-      /video|design|editing|freelance/i.test(`${e.title} ${e.summary}`),
+    const independent = resumeFacts.experience.filter((e) =>
+      /freelance|contract|self[- ]employed|independent|consultant/i.test(`${e.title} ${e.summary}`),
     );
-    if (nonEngineering.length) {
+    if (independent.length) {
       lines.push(
-        `I also see freelance ${nonEngineering.map((e) => e.title).join(", ")} experience — I'll frame that as proof of client delivery, not a gap.`,
+        `I also see independent ${independent.map((e) => e.title).join(", ")} work — I'll frame that as proof of client delivery, not a gap.`,
       );
     }
   }

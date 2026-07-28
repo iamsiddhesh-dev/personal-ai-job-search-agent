@@ -4,14 +4,19 @@
 // SPECIFIC hook pulled from the actual job/company text and the one-line "lead
 // with this" resume angle. DRAFTS ONLY — nothing here ever sends.
 //
-// Voice/tone comes straight from the templates Siddhesh wrote by hand (the
-// second sheet of Job-Search-Tracker.xlsx):
-//   - Cold email: real hook → a project he actually built with the overlap made
-//     explicit → "2025 ECE grad (PICT Pune), ships fast" → the role shape →
-//     "worth a 15-min call? happy to build a POC against your product first".
+// Voice/tone comes from a hand-written outreach template that measurably
+// out-performed generic applications:
+//   - Cold email: real hook → something the candidate actually built or shipped,
+//     with the overlap made explicit → a one-line self-description → the role
+//     shape → "worth a 15-min call? happy to build a POC against your product
+//     first".
 //   - LinkedIn DM: same idea compressed into the 300-char connection-note limit.
-//   - His stated differentiator is the "POC first" offer; the hook MUST be real
-//     (a generic hook reads as spam).
+//   - The "POC first" offer is the differentiator; the hook MUST be real (a
+//     generic hook reads as spam).
+//
+// Every candidate-specific detail — name, self-description, background — comes
+// from the profile row. Nothing about any one person belongs in this file: a
+// hardcoded name here signs every user's outreach with the wrong one.
 //
 // The exit-test criterion is enforced in code, not just asked for in the prompt:
 // no leftover [BRACKET] placeholders, and the LinkedIn note within its char cap.
@@ -39,8 +44,8 @@ export interface DraftExperience {
 
 export interface DraftProfile {
   name: string | null;
-  githubUrl: string | null; // e.g. https://github.com/iamsiddhesh-dev
-  headline: string | null; // one-line self-description, e.g. "2025 ECE grad (PICT Pune)…"
+  githubUrl: string | null; // e.g. https://github.com/<handle>
+  headline: string | null; // one-line self-description, e.g. "backend engineer, 2 yrs, ships fast"
   projects: DraftProject[];
   experience: DraftExperience[];
 }
@@ -109,7 +114,7 @@ const draftSchema = z.object({
       .describe("Cold email subject. Pattern: \"Built <project> — relevant to <company>'s <product area>\". Real project + real product area, no brackets."),
     body: z
       .string()
-      .describe("The full cold email body, greeting to sign-off, newlines between paragraphs. Signed '- Siddhesh'. No placeholders."),
+      .describe("The full cold email body, greeting to sign-off, newlines between paragraphs. Signed with the candidate's first name. No placeholders."),
   }),
   linkedin: z.object({
     body: z
@@ -147,11 +152,26 @@ function buildPrompt(
     ? `\n\nFIX THESE PROBLEMS FROM YOUR PREVIOUS ATTEMPT:\n- ${corrections.join("\n- ")}\n`
     : "";
 
-  return `You are ${profile.name ?? "a candidate"}'s outreach assistant. Write a cold email and a LinkedIn connection-note DM for ONE specific job opening, in ${profile.name ?? "the candidate"}'s own voice. These are DRAFTS the candidate will review and send himself — you never send anything.
+  // Sign-off uses the first name only, which is how these actually read. With
+  // no name on file there is nothing honest to sign — a placeholder would
+  // violate the HARD RULES below, so the draft closes without one.
+  const firstName = profile.name?.trim().split(/\s+/)[0] ?? null;
+  const signOff = firstName
+    ? `- Sign off "- ${firstName}".`
+    : `- Sign off with "Thanks," and nothing else — no name is on file, and a made-up or bracketed one is worse than none.`;
+
+  // The self-description line is the candidate's own positioning. Omitted
+  // entirely when unknown rather than invented: a fabricated background is the
+  // one error that can't be walked back after the email is sent.
+  const selfDescription = profile.headline
+    ? `- Line 3: their own positioning — "${profile.headline}" — and the role shape they're after (founding / forward-deployed / full-stack engineer, or intern — whichever fits this team).`
+    : `- Line 3: the role shape they're after (founding / forward-deployed / full-stack engineer, or intern — whichever fits this team). Do NOT describe their background, education, or graduation year — none is on file and you must not invent one.`;
+
+  return `You are ${profile.name ?? "a candidate"}'s outreach assistant. Write a cold email and a LinkedIn connection-note DM for ONE specific job opening, in ${profile.name ?? "the candidate"}'s own voice. These are DRAFTS the candidate will review and send themselves — you never send anything.
 
 CANDIDATE
 Name: ${profile.name ?? "unknown"} (address the recipient by their first name is not possible — you do not know it; open the email with "Hi there," and the DM with "Hi —").
-Self-description: ${profile.headline ?? "2025 ECE grad (PICT Pune) moving full-time into full-stack + AI engineering; ships fast."}
+Self-description: ${profile.headline ?? "(none on file — do not invent one)"}
 GitHub: ${profile.githubUrl ?? "(none provided)"}
 Real professional experience (jobs/internships — you may ONLY reference these, never invent one):
 ${experienceBlock(profile.experience)}
@@ -178,13 +198,13 @@ Cold email:
 - Open "Hi there,".
 - Line 1: a REAL, specific hook — what ${job.company} is actually building, drawn only from the role details above. One sentence showing you understand what they do and for whom. Do NOT invent funding rounds, launches, or news you cannot see in the text above — a fabricated hook is worse than none.
 - Line 2: if leading with experience, "${`I worked on ${match.leadProof} — <one line making the overlap with what they do explicit>.`}" If leading with a project, "${`I recently built ${match.leadProof} — <one line making the overlap with what they do explicit>.`}" If (and only if) a relevant project has a real link above, add "Live/code here: <the actual URL>." If it has no link, do not mention a link at all. Also point to the GitHub URL above if one exists.${match.standoutProject ? ` If it strengthens the pitch, briefly also mention the project "${match.standoutProject}" — one short clause, not a second paragraph.` : ""}
-- Line 3: the "2025 ECE grad (PICT Pune), moving into full-stack + AI, ships fast" angle, and the role shape you're after (founding / forward-deployed / full-stack engineer, or intern — whichever fits this team).
+${selfDescription}
 - Line 4: "Worth a 15-minute call? Happy to build a small POC against your product first if that's more useful." (This POC-first offer is the differentiator — keep it.)
-- Sign off "- Siddhesh".
+${signOff}
 
 LinkedIn DM:
 - One message, ${LINKEDIN_MAX_CHARS} characters or fewer (it's sent as a connection-request note).
-- Open "Hi —". Name the lead ${match.leadProofType === "experience" ? "experience" : "project"} + the stack/domain overlap with ${job.company}, offer to prove it with a POC, mention 2025 grad, end with "Open to a quick chat?".
+- Open "Hi —". Name the lead ${match.leadProofType === "experience" ? "experience" : "project"} + the stack/domain overlap with ${job.company}, offer to prove it with a POC, end with "Open to a quick chat?". Only mention their background or graduation year if a self-description is on file above.
 
 HARD RULES
 - Output NO square-bracket placeholders. Every detail must be real and specific to ${job.company} and to ${profile.name ?? "the candidate"}'s actual projects. If you don't have a real value for something, rewrite the sentence so it isn't needed — never leave a "[...]" slot.

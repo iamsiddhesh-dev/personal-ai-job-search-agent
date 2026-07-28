@@ -15,7 +15,7 @@
 //        zero quality loss and seconds, not minutes, of latency.
 //   3. LLM re-rank        — scores those ~60 (in token-safe batches, see
 //        RERANK_BATCH_SIZE) on true-capability overlap (real experience first,
-//        projects second), requirement/seniority match, India location
+//        projects second), requirement/seniority match, location
 //        feasibility and hiring-signal strength -> every job that scores above
 //        a threshold is returned (not a fixed top-N) with leadProof/gaps/
 //        rationale.
@@ -35,7 +35,7 @@ import { z } from "zod";
 // Public types
 // ---------------------------------------------------------------------------
 
-export type LocationPref = "india" | "remote" | "anywhere";
+export type LocationPref = "local" | "remote" | "anywhere";
 export type TeamSizeBucket = "lt10" | "10-50" | "50-200" | "any";
 
 export interface MatchProject {
@@ -227,22 +227,65 @@ const SENIOR_TITLE_RX =
 // Free-text locations are messy ("San Francisco, CA", "Remote - USA",
 // "World Wide - Remote", "Bengaluru"). Matching is done with Postgres ~* on the
 // raw location string plus the is_remote flag.
-const INDIA_RX =
-  "india|bangalore|bengaluru|pune|mumbai|delhi|hyderabad|gurgaon|gurugram|noida|chennai|kolkata|ahmedabad|jaipur";
-const GLOBAL_REMOTE_RX = "world ?wide|anywhere|globally|global remote|remote - global";
+//
+// A "local" search means "roles I could actually take from where I live", which
+// requires knowing which cities count as that candidate's country. There is no
+// worldwide city dataset here and inventing one would be worse than admitting
+// the limit — so this is an extension point with one country filled in. Add a
+// row to widen coverage; anything unlisted degrades gracefully below.
+const COUNTRY_LOCATION_PATTERNS: Record<string, string> = {
+  india:
+    "india|bangalore|bengaluru|pune|mumbai|delhi|hyderabad|gurgaon|gurugram|noida|chennai|kolkata|ahmedabad|jaipur",
+};
 
-function locationCondition(pref: LocationPref): SQL | undefined {
+const GLOBAL_REMOTE_RX = "world ?wide|anywhere|globally|global remote|remote - global";
+const REMOTE_SQL_RX = `remote|${GLOBAL_REMOTE_RX}`;
+
+// Postgres ~* takes a regex, so anything interpolated from user text must have
+// its metacharacters neutered or a stray "(" becomes a query error.
+function escapeRx(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+// Which country pattern (if any) covers this candidate's free-text location.
+function localPatternFor(profileLocation: string | null): string | null {
+  if (!profileLocation) return null;
+  const hay = profileLocation.toLowerCase();
+
+  for (const [country, rx] of Object.entries(COUNTRY_LOCATION_PATTERNS)) {
+    // Match either the country name or any of its listed cities, so both
+    // "Pune, India" and a bare "Pune" resolve.
+    if (hay.includes(country) || new RegExp(`\\b(${rx})\\b`).test(hay)) return rx;
+  }
+
+  // Unlisted country: fall back to the raw location text. Narrower than a real
+  // country map (a "Lisbon" candidate won't see "Porto" roles) but it never
+  // shows an onsite role on the wrong continent, which is the failure that
+  // actually wastes someone's time.
+  const token = hay.split(/[,/|]/)[0].trim();
+  return token.length >= 3 ? escapeRx(token) : null;
+}
+
+function locationCondition(pref: LocationPref, profileLocation: string | null): SQL | undefined {
   switch (pref) {
     case "anywhere":
       return undefined;
     case "remote":
-      return sql`(${jobs.isRemote} = true OR ${jobs.location} ~* 'remote|${sql.raw(GLOBAL_REMOTE_RX)}')`;
-    case "india":
-      // India-based user (REVISED-PLAN §12 top risk): keep India-located roles
-      // and any remote role (feasibility of a country-locked remote is left to
-      // the LLM to flag), but drop US/EU *onsite* roles — a Pune user can't take
-      // an SF-onsite job. That exclusion is exactly the point of this filter.
-      return sql`(${jobs.location} ~* '${sql.raw(INDIA_RX)}' OR ${jobs.isRemote} = true OR ${jobs.location} ~* 'remote|${sql.raw(GLOBAL_REMOTE_RX)}')`;
+      return sql`(${jobs.isRemote} = true OR ${jobs.location} ~* '${sql.raw(REMOTE_SQL_RX)}')`;
+    case "local": {
+      // Keep roles in the candidate's own country plus any remote role
+      // (feasibility of a country-locked remote is left to the LLM to flag),
+      // but drop onsite roles elsewhere — someone in Pune can't take an
+      // SF-onsite job. That exclusion is exactly the point of this filter.
+      const localRx = localPatternFor(profileLocation);
+      if (!localRx) {
+        // Location unknown: there is nothing to filter on, and guessing would
+        // silently hide good roles. Show everything and let the re-rank flag
+        // feasibility instead.
+        return undefined;
+      }
+      return sql`(${jobs.location} ~* '${sql.raw(localRx)}' OR ${jobs.isRemote} = true OR ${jobs.location} ~* '${sql.raw(REMOTE_SQL_RX)}')`;
+    }
   }
 }
 
@@ -279,7 +322,11 @@ interface Candidate {
   ycBatch: string | null;
 }
 
-async function ruleFilter(opts: MatchOptions, dropSeniorTitles: boolean): Promise<Candidate[]> {
+async function ruleFilter(
+  opts: MatchOptions,
+  dropSeniorTitles: boolean,
+  profileLocation: string | null,
+): Promise<Candidate[]> {
   // Skip the title filter entirely for an "any" role search (show all job types).
   const roleCond = isAnyRole(opts.roleFocus)
     ? undefined
@@ -288,7 +335,7 @@ async function ruleFilter(opts: MatchOptions, dropSeniorTitles: boolean): Promis
   const conds: (SQL | undefined)[] = [
     eq(jobs.isActive, true),
     roleCond,
-    locationCondition(opts.locationPref),
+    locationCondition(opts.locationPref, profileLocation),
     teamSizeCondition(opts.teamSizeBucket),
   ];
   if (dropSeniorTitles) {
@@ -496,7 +543,7 @@ function profileBlock(profile: MatchProfile): string {
     .join("\n");
   return [
     `Name: ${profile.name ?? "unknown"}`,
-    `Based in: ${profile.location ?? "India (assume India)"}`,
+    `Based in: ${profile.location ?? "not specified"}`,
     `Years of professional experience: ${profile.yearsExperience}`,
     `Seniority: ${profile.seniority ?? "unstated — treat as early-career"}`,
     `Skills: ${profile.skills.join(", ") || "n/a"}`,
@@ -535,7 +582,7 @@ TASK
 Score EVERY role listed above, 0–100, on the weighted combination:
 - True-capability overlap: does what this company builds line up with what the candidate has actually DONE? Real, relevant job/internship experience is the strongest signal — weigh it above projects whenever the candidate has any. Projects are the primary signal only when the candidate has no relevant experience; an unusually strong, directly-relevant project can also add to (not replace) an experience-led case. Reward concrete overlap ("they're building onboarding, he shipped onboarding flows at Acme"), not vague topical similarity.
 - Requirement & seniority match: the candidate has ${profile.yearsExperience} years of professional experience. A role clearly wanting significantly more experience, or a senior/staff specialty, is a weak fit even if the domain matches — score it low and say so in gaps. Do not reward roles the candidate is plainly under-qualified for.
-- Location feasibility for someone based in India: an onsite US/EU role is a poor fit unless it is genuinely remote-friendly to India. Reflect this in the score and call it out in gaps when relevant.
+- Location feasibility, judged against where the candidate is based (see "Based in" above): an onsite role in a different country is a poor fit unless it is genuinely remote-friendly to their country. Reflect this in the score and call it out in gaps when relevant. If their location is "not specified", do not penalize any role on location.
 - Hiring-signal strength: all of these are verified live openings, so use "verified"; only use "inferred" if you are truly guessing.
 
 RULES
@@ -644,7 +691,7 @@ export async function runMatch(profile: MatchProfile, opts: MatchOptions): Promi
   const dropSeniorTitles = opts.dropSeniorTitles ?? profile.yearsExperience <= 1;
 
   log("Stage 1 — rule filter");
-  const raw = await ruleFilter(opts, dropSeniorTitles);
+  const raw = await ruleFilter(opts, dropSeniorTitles, profile.location);
   // JD "N+ years" gate and the active-enrollment gate both need the
   // description text, so they run in JS here rather than SQL.
   let yearsDropped = 0;

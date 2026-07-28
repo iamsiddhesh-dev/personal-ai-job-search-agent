@@ -3,7 +3,7 @@
 // this can't be fully automated, only "did we invent anything" can be checked.
 //
 // Needs: jobagent/tests/fixtures/resume.pdf (gitignored, not committed) and a
-// GITHUB_USERNAME env var (or edit the constant below).
+// GITHUB_USERNAME env var.
 //
 // Run: node --env-file=.env node_modules/tsx/dist/cli.mjs scripts/test-phase2.ts
 
@@ -15,7 +15,8 @@ import { fetchGithubProfile } from "@/lib/profile/github";
 import { mergeProfile } from "@/lib/profile/merge";
 
 const FIXTURE_PATH = path.join(process.cwd(), "tests/fixtures/resume.pdf");
-const GITHUB_USERNAME = process.env.GITHUB_USERNAME || "iamsiddhesh-dev";
+const GITHUB_USERNAME = process.env.GITHUB_USERNAME ?? "";
+if (!GITHUB_USERNAME) throw new Error("Set GITHUB_USERNAME in .env to run this script.");
 
 async function main() {
   if (!existsSync(FIXTURE_PATH)) {

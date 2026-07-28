@@ -22,16 +22,30 @@ interface DraftsRequest {
   regenerate?: boolean;
 }
 
-function buildHeadline(facts: ResumeFacts | null, seniority: string | null): string | null {
-  if (!facts) return seniority ? `${seniority} software engineer` : null;
-  const edu = facts.education?.[0];
+// The candidate's one-line positioning, built entirely from their own profile.
+// Nothing here may describe a discipline the profile doesn't show: calling a
+// data engineer a "full-stack + AI engineer" puts a false claim in an email
+// they're about to send under their own name.
+function buildHeadline(
+  facts: ResumeFacts | null,
+  seniority: string | null,
+  skills: string[],
+): string | null {
   const parts: string[] = [];
+
+  const edu = facts?.education?.[0];
   if (edu) {
     const year = edu.graduationYear ? `${edu.graduationYear} ` : "";
     parts.push(`${year}grad — ${edu.degree}, ${edu.institution}`.trim());
   }
-  parts.push(`${seniority ?? "early-career"} full-stack + AI engineer who ships fast`);
-  return parts.join("; ");
+
+  // Top skills stand in for the discipline; without them, stay generic rather
+  // than guess a specialism.
+  const focus = skills.slice(0, 3).join(" / ");
+  const level = seniority ?? "early-career";
+  parts.push(focus ? `${level} engineer — ${focus}` : `${level} software engineer`);
+
+  return parts.length ? parts.join("; ") : null;
 }
 
 export async function POST(req: Request) {
@@ -77,6 +91,7 @@ export async function POST(req: Request) {
       profileGithub: profiles.github,
       profileResumeFacts: profiles.resumeFacts,
       profileSeniority: profiles.seniority,
+      profileSkills: profiles.skills,
     })
     .from(matches)
     .innerJoin(jobs, eq(matches.jobId, jobs.id))
@@ -108,7 +123,7 @@ export async function POST(req: Request) {
   const profile: DraftProfile = {
     name: row.profileName ?? github?.name ?? null,
     githubUrl: github?.username ? `https://github.com/${github.username}` : null,
-    headline: buildHeadline(facts, row.profileSeniority),
+    headline: buildHeadline(facts, row.profileSeniority, row.profileSkills ?? []),
     projects,
     experience,
   };
