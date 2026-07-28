@@ -11,7 +11,13 @@
 import { generateText, type ModelMessage } from "ai";
 import { chatModelChain } from "@/lib/llm";
 
-const SUMMARIZE_PROMPT = `Condense this conversation between a job-hunting agent and a candidate into a short factual note, under 120 words. Capture only: the role/location/team-size preferences the candidate has stated, key facts about their background the agent has learned, companies/jobs already shown or discussed, and anything marked applied or rejected. Plain facts, no chit-chat, no commentary on the conversation itself.`;
+const SUMMARIZE_PROMPT = `Condense this conversation between a job-hunting agent and a candidate into a short factual note, under 150 words. Anything you drop, the agent will ask for a second time — which reads as not listening. Capture, in this order of priority:
+1. The candidate's NAME, and whether a resume/github/linkedin/portfolio has been shared.
+2. Stated preferences: role focus, location and remote/hybrid/onsite/relocation stance, company stage or size.
+3. Softer qualifiers if mentioned: timeline or urgency, dealbreakers, work authorization, comp expectations.
+4. Key background facts the agent has learned, companies/jobs already shown or discussed, and anything marked applied or rejected.
+5. The candidate's current mood/energy (e.g. "frustrated after 3 rejections", "hyped about the offer", "burnt out on the search") if the conversation shows one — this keeps the agent's tone consistent after the note replaces the raw messages.
+Plain facts, no chit-chat, no commentary on the conversation itself.`;
 
 export async function summarizeTurns(turns: ModelMessage[]): Promise<string> {
   const transcript = turns
