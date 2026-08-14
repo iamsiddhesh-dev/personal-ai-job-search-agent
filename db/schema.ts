@@ -14,6 +14,24 @@ import {
 export const users = pgTable("users", {
   id: uuid("id").primaryKey().defaultRandom(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+
+  // Supabase Auth uid (auth.users.id), unique. NULL means the row predates auth
+  // and is still pinned to an sh_uid cookie — getOrCreateUser() claims those on
+  // first sight rather than minting a replacement. Kept as a plain uuid with no
+  // .references(): auth.users lives in another schema that Drizzle does not
+  // model here, and a real FK would couple our migrations to Supabase's.
+  authUserId: uuid("auth_user_id").unique(),
+
+  // Mirrored off the Google identity at sign-in so the UI can render an account
+  // menu without a round trip to the auth server on every paint.
+  email: text("email"),
+  displayName: text("display_name"),
+  avatarUrl: text("avatar_url"),
+
+  // False only once a real identity is linked. Defaults true because every
+  // visitor starts anonymous — that is the whole gate design.
+  isAnonymous: boolean("is_anonymous").notNull().default(true),
+  lastSeenAt: timestamp("last_seen_at", { withTimezone: true }),
 });
 
 export const profiles = pgTable("profiles", {
