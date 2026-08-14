@@ -53,6 +53,8 @@ type AuthIdentity = {
   isAnonymous: boolean;
 };
 
+const str = (v: unknown) => (typeof v === "string" && v.trim() ? v : null);
+
 function identityFromMetadata(
   authUserId: string,
   email: unknown,
@@ -63,7 +65,17 @@ function identityFromMetadata(
   // `avatar_url`, but the OIDC-standard `name`/`picture` also turn up depending
   // on which token the identity was built from. Read both rather than picking
   // one and discovering later that half the accounts render blank.
-  const str = (v: unknown) => (typeof v === "string" && v.trim() ? v : null);
+  //
+  // In practice `metadata` (top-level user_metadata, mirrored into JWT claims)
+  // is EMPTY on the linkIdentity path — verified live: raw_user_meta_data held
+  // only `{email_verified:true}` after a real Google link, while the name and
+  // picture sat in auth.identities.identity_data instead. Supabase copies a
+  // provider's profile fields into user_metadata on a fresh sign-up, not on a
+  // link to an existing (anonymous) user. So this function's return is
+  // routinely null for both fields on exactly the path Phase A's whole design
+  // is built around; do not rely on it alone. See applyIdentityProfile below,
+  // which reads the identity's own data instead and is what actually fills
+  // these in after the anonymous -> Google upgrade.
   return {
     authUserId,
     email: str(email),
@@ -71,6 +83,52 @@ function identityFromMetadata(
     avatarUrl: str(metadata?.avatar_url) ?? str(metadata?.picture),
     isAnonymous,
   };
+}
+
+// Pulls the name/avatar/email Google actually gave us out of the linked
+// identity, and writes it once. This is deliberately NOT part of the
+// getOrCreateUser() hot path — it needs the full auth-server User object
+// (identities included), which getClaims()'s JWT does not carry, and fetching
+// it via getUser() would mean an extra network round trip to Supabase on every
+// one of the six call sites across all five routes. It only needs to run once,
+// exactly when Supabase hands us that full object for free: right after
+// exchangeCodeForSession in app/auth/callback/route.ts.
+//
+// Safe to call on every sign-in, not just the first: identity_data doesn't
+// change often, and the write only fires when something is actually different
+// (see the `patch` check below), same as reconcile().
+export async function applyIdentityProfile(
+  userId: string,
+  identities: { provider: string; identity_data?: Record<string, unknown> }[] | undefined,
+): Promise<void> {
+  // Anonymous sessions carry an "anonymous" pseudo-identity with no useful
+  // profile data. The real one — google, github, whatever comes next — is
+  // whichever other entry is present. `identities` holds every identity ever
+  // linked to this auth user, but Phase A only ever links one non-anonymous
+  // provider, so "first non-anonymous" is unambiguous today.
+  const linked = identities?.find((i) => i.provider !== "anonymous")?.identity_data;
+  if (!linked) return;
+
+  const patch: Partial<typeof users.$inferInsert> = {};
+  const email = str(linked.email);
+  const displayName = str(linked.full_name) ?? str(linked.name);
+  const avatarUrl = str(linked.avatar_url) ?? str(linked.picture);
+
+  const [existing] = await db
+    .select({ email: users.email, displayName: users.displayName, avatarUrl: users.avatarUrl })
+    .from(users)
+    .where(eq(users.id, userId))
+    .limit(1);
+  if (!existing) return;
+
+  // Same rule as reconcile(): fill in or update, never null out something we
+  // already have from a source that turned out to carry less.
+  if (email && email !== existing.email) patch.email = email;
+  if (displayName && displayName !== existing.displayName) patch.displayName = displayName;
+  if (avatarUrl && avatarUrl !== existing.avatarUrl) patch.avatarUrl = avatarUrl;
+
+  if (Object.keys(patch).length === 0) return;
+  await db.update(users).set(patch).where(eq(users.id, userId));
 }
 
 // Returns null when Supabase Auth cannot give us an identity at all — the
@@ -226,10 +284,14 @@ type ExistingUser = {
 };
 
 // Folds anything that changed on the auth side into our row, in one statement
-// and only when there is something to write. This is what carries a Google
-// display name and avatar across after the anonymous -> Google upgrade: the
-// upgrade keeps the same auth uid, so no other code path would ever notice the
-// account stopped being anonymous.
+// and only when there is something to write. This DOES flip is_anonymous
+// after the upgrade — the upgrade keeps the same auth uid, so no other code
+// path would otherwise notice the account stopped being anonymous — but it is
+// NOT what carries the display name and avatar across, whatever the name
+// suggests. Those come from identity.displayName/avatarUrl, which
+// identityFromMetadata() reads from JWT user_metadata — routinely empty on the
+// linkIdentity path (see the long comment there). applyIdentityProfile() in
+// app/auth/callback/route.ts is what actually fills them in.
 async function reconcile(existing: ExistingUser, identity: AuthIdentity): Promise<void> {
   const patch: Partial<typeof users.$inferInsert> = {};
 

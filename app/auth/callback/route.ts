@@ -8,7 +8,7 @@
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { createClient } from "@/lib/supabase/server";
-import { getOrCreateUser, UUID_RX } from "@/lib/user";
+import { applyIdentityProfile, getOrCreateUser, UUID_RX } from "@/lib/user";
 import { mergeUsers } from "@/lib/account/merge";
 
 // Set by the client just before it starts the signInWithOAuth fallback, holding
@@ -48,7 +48,7 @@ export async function GET(req: Request) {
   // on, so pass it when present and let the client fall back to its single
   // stored verifier when it is not.
   const flowId = url.searchParams.get("sb_flow_id");
-  const { error: exchangeError } = await supabase.auth.exchangeCodeForSession(
+  const { data: exchangeData, error: exchangeError } = await supabase.auth.exchangeCodeForSession(
     code,
     flowId ? { flowId } : undefined,
   );
@@ -65,6 +65,18 @@ export async function GET(req: Request) {
   // path this is the same users row as before the redirect — same auth uid, so
   // nothing to merge, which is the whole reason linkIdentity is tried first.
   const userId = await getOrCreateUser();
+
+  // exchangeCodeForSession's own response is the ONLY place identities[] is
+  // available for free — getClaims()'s JWT, which getOrCreateUser() reads, does
+  // not carry it, and a name/avatar entered via Google only ever lands in
+  // identity_data, not in user_metadata, on this path. See lib/user.ts. Never
+  // block or fail the sign-in on this: a missing name/avatar is cosmetic, an
+  // unusable session is not.
+  try {
+    await applyIdentityProfile(userId, exchangeData.user.identities);
+  } catch (err) {
+    console.error("[auth/callback] applyIdentityProfile failed:", err);
+  }
 
   if (mergeFrom && UUID_RX.test(mergeFrom) && mergeFrom !== userId) {
     try {
