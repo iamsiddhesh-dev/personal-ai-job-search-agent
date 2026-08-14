@@ -10,6 +10,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { LogOut, User } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
+import { beginGoogle, hasPendingRetry, isSigningIn, setSigningIn } from "@/lib/account/googleSignIn";
 
 type Account = {
   authConfigured: boolean;
@@ -17,41 +18,19 @@ type Account = {
   email: string | null;
   displayName: string | null;
   avatarUrl: string | null;
+  // See GOOGLE_LINKED_COOKIE in app/auth/callback/route.ts. True once this
+  // browser has ever completed a Google sign-in, survives sign-out.
+  hasSignedInBefore: boolean;
 };
-
-// Module level, and touching no React state on purpose. Every path through it
-// ends in a full-page redirect to Google, so there is no component left to
-// re-render — and keeping setState out of it is what lets the identity-exists
-// fallback below run straight from an effect.
-async function beginGoogle(mode: "link" | "signin"): Promise<string | null> {
-  const supabase = createClient();
-  if (!supabase) return "not_configured";
-
-  // Record which account is being left behind before leaving the page; see
-  // app/api/account/route.ts.
-  try {
-    await fetch("/api/account", { method: "POST", credentials: "same-origin" });
-  } catch {
-    // Non-fatal: without it a fallback sign-in cannot merge, but the sign-in
-    // itself still works and the anonymous data is still in Postgres.
-  }
-
-  const redirectTo = `${window.location.origin}/auth/callback`;
-
-  // linkIdentity first, because it keeps the same auth uid — which means the
-  // profile, runs and applications already on this account need no migration.
-  const { error } =
-    mode === "link"
-      ? await supabase.auth.linkIdentity({ provider: "google", options: { redirectTo } })
-      : await supabase.auth.signInWithOAuth({ provider: "google", options: { redirectTo } });
-
-  return error ? error.message : null;
-}
 
 export function AccountMenu() {
   const [account, setAccount] = useState<Account | null>(null);
   const [open, setOpen] = useState(false);
-  const [busy, setBusy] = useState(false);
+  // Seeded from sessionStorage, not false: if this render is the page load
+  // right after a redirect to Google, the button must read as busy from its
+  // very first paint, not flip to busy only once the account fetch below
+  // resolves a moment later.
+  const [busy, setBusy] = useState(() => isSigningIn());
   const rootRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -59,7 +38,17 @@ export function AccountMenu() {
     fetch("/api/account", { credentials: "same-origin" })
       .then((res) => (res.ok ? res.json() : null))
       .then((data: Account | null) => {
-        if (!cancelled && data) setAccount(data);
+        if (cancelled || !data) return;
+        setAccount(data);
+        // Clear busy only if nothing further is about to redirect the page
+        // away again — GoogleAuthRetry (mounted at the app root) checks the
+        // same URL param and, if present, will fire another beginGoogle()
+        // that re-sets this flag anyway. Clearing it here first would just
+        // produce one frame of "idle" between the two hops.
+        if (!hasPendingRetry()) {
+          setSigningIn(false);
+          setBusy(false);
+        }
       })
       .catch(() => {
         // A failed account fetch must never take the chat down with it — the
@@ -70,23 +59,12 @@ export function AccountMenu() {
     };
   }, []);
 
-  // The identity-exists fallback. linkIdentity cannot fail fast: the conflict
-  // is only discovered once Google has redirected back, so it arrives as a
-  // query param on this page rather than as a rejected promise. Retrying as a
-  // plain sign-in lands the user in the account they already had, and the merge
-  // cookie set before the first attempt is still in the jar, so
-  // app/auth/callback folds this device's anonymous work into it.
-  useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    if (params.get("auth_error") !== "identity_already_exists") return;
-
-    // Strip it first, or a back-navigation re-triggers the whole redirect.
-    params.delete("auth_error");
-    const query = params.toString();
-    window.history.replaceState({}, "", window.location.pathname + (query ? `?${query}` : ""));
-
-    void beginGoogle("signin");
-  }, []);
+  // The identity-exists retry itself is NOT handled here — see
+  // components/hunt/GoogleAuthRetry.tsx, mounted at the app root. It has to
+  // run regardless of whether the chat panel (and therefore this component)
+  // is even mounted, since Google's redirect back always lands on the hero
+  // screen. This component only needs to reflect the busy state the retry
+  // sets, via isSigningIn()/hasPendingRetry() above.
 
   useEffect(() => {
     if (!open) return;
@@ -103,12 +81,17 @@ export function AccountMenu() {
       return;
     }
     setBusy(true);
-    const failure = await beginGoogle("link");
+    // See beginGoogle's comment: a browser that has signed in with Google
+    // before skips the doomed linkIdentity attempt and goes straight to a
+    // normal sign-in, which the merge cookie set inside beginGoogle still
+    // carries the anonymous account's data across from.
+    const mode = account?.hasSignedInBefore ? "signin" : "link";
+    const failure = await beginGoogle(mode);
     if (failure) {
       setBusy(false);
       console.error("[account] google sign-in failed:", failure);
     }
-  }, [account?.signedIn]);
+  }, [account?.signedIn, account?.hasSignedInBefore]);
 
   const signOut = useCallback(async () => {
     const supabase = createClient();

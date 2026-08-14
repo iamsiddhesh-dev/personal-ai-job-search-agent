@@ -12,7 +12,7 @@ import { db } from "@/lib/db";
 import { users } from "@/db/schema";
 import { getOrCreateUser } from "@/lib/user";
 import { supabaseAuthEnv } from "@/lib/supabase/env";
-import { MERGE_FROM_COOKIE } from "@/app/auth/callback/route";
+import { GOOGLE_LINKED_COOKIE, MERGE_FROM_COOKIE } from "@/app/auth/callback/route";
 
 export async function GET() {
   const userId = await getOrCreateUser();
@@ -27,6 +27,13 @@ export async function GET() {
     .where(eq(users.id, userId))
     .limit(1);
 
+  // Tells the menu which sign-in leg to try first. See GOOGLE_LINKED_COOKIE's
+  // comment in app/auth/callback/route.ts — this is what lets a sign-out then
+  // sign-back-in skip the linkIdentity attempt that would only collide and
+  // fall back anyway.
+  const store = await cookies();
+  const hasSignedInBefore = store.get(GOOGLE_LINKED_COOKIE)?.value === "1";
+
   return Response.json({
     // Lets the menu hide sign-in entirely rather than offering a button that
     // only fails after a round trip to Google.
@@ -35,6 +42,7 @@ export async function GET() {
     email: row?.email ?? null,
     displayName: row?.displayName ?? null,
     avatarUrl: row?.avatarUrl ?? null,
+    hasSignedInBefore,
   });
 }
 

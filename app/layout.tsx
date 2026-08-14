@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import { cabinetGrotesk, ranade, bespokeSlab } from "@/lib/fonts";
+import GoogleAuthRetry from "@/components/hunt/GoogleAuthRetry";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -28,7 +29,13 @@ export default function RootLayout({
       lang="en"
       className={`${geistSans.variable} ${geistMono.variable} ${cabinetGrotesk.variable} ${ranade.variable} ${bespokeSlab.variable} h-full antialiased`}
     >
-      <body className="min-h-full flex flex-col">{children}</body>
+      <body className="min-h-full flex flex-col">
+        {/* Must be mounted regardless of which screen is showing — see the
+            component's own comment for why this cannot live inside
+            AccountMenu. */}
+        <GoogleAuthRetry />
+        {children}
+      </body>
     </html>
   );
 }

@@ -17,6 +17,27 @@ import { mergeUsers } from "@/lib/account/merge";
 // fresh server context with nothing else carried over.
 export const MERGE_FROM_COOKIE = "sh_merge_from";
 
+// Set once, on every successful sign-in, and deliberately never cleared —
+// including by sign-out. Lets AccountMenu skip straight to signInWithOAuth
+// instead of trying linkIdentity first on a later sign-in from this browser.
+//
+// Without this: sign-out clears the session, so the next getOrCreateUser()
+// mints a fresh anonymous account, and clicking sign-in tries linkIdentity()
+// on THAT — which collides with the Google identity already linked to the
+// account this browser signed out of, and only then falls back. Every
+// ordinary sign-out -> sign-back-in paid for a redirect to Google that was
+// always going to fail. This cookie lets that case skip straight to the
+// hop that actually works.
+//
+// Purely an optimization hint, never a security boundary. Read back in
+// app/api/account/route.ts's GET. Stale or wrong in either direction costs
+// nothing but a redundant round trip: a false positive just means
+// signInWithOAuth runs instead of linkIdentity for someone who happened to
+// clear this one cookie but not others, which still signs them in correctly
+// via the existing merge path.
+export const GOOGLE_LINKED_COOKIE = "sh_google_linked";
+const ONE_YEAR_SECONDS = 60 * 60 * 24 * 365;
+
 export async function GET(req: Request) {
   const url = new URL(req.url);
   const code = url.searchParams.get("code");
@@ -102,6 +123,17 @@ export async function GET(req: Request) {
   }
 
   if (mergeFrom) store.delete(MERGE_FROM_COOKIE);
+
+  // Reached only after a real session exists (exchangeCodeForSession above
+  // succeeded), so this browser has now completed a Google sign-in at least
+  // once. See the constant's comment for why this survives sign-out.
+  store.set(GOOGLE_LINKED_COOKIE, "1", {
+    httpOnly: true,
+    sameSite: "lax",
+    secure: process.env.NODE_ENV === "production",
+    path: "/",
+    maxAge: ONE_YEAR_SECONDS,
+  });
 
   const next = url.searchParams.get("next");
   // Only ever redirect to a path on this origin. `next` arrives from the URL,
