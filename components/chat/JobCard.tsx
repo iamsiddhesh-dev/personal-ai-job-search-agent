@@ -49,7 +49,8 @@ export default function JobCard({ job }: { job: RankedMatch }) {
       }
       setDrafts(json.drafts as OutreachDrafts);
     } catch (err) {
-      setDraftError((err as Error).message);
+      console.error("[drafts] request failed:", err);
+      setDraftError("couldn't reach the server for that one. try again?");
     } finally {
       setDrafting(false);
     }

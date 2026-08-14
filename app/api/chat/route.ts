@@ -114,8 +114,9 @@ export async function POST(req: Request) {
       });
       // Whichever side loses the race must not reject unhandled: past the
       // deadline the turn keeps running and will reject on the abort, long
-      // after the user has already been told.
-      turn.catch(() => {});
+      // after the user has already been told. Still logged — when a turn blows
+      // the deadline, why it was slow is the only thing worth knowing.
+      turn.catch((err) => console.error("[chat] abandoned turn later failed:", err));
 
       try {
         const { text } = await Promise.race([turn, deadline]);

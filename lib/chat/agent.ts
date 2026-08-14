@@ -415,6 +415,16 @@ export interface ChatTurnInput {
   signal?: AbortSignal;
 }
 
+// A key the provider refuses (401/403) is not a code bug and not a quota — it's
+// one dead entry in a pool. The chain is built key-by-key (see chatModelChain),
+// so the next entry may well be fine and the turn should go on. It is still a
+// misconfiguration somebody has to fix, hence the loud log.
+function isKeyRejected(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  const status = (err as { statusCode?: number })?.statusCode;
+  return status === 401 || status === 403 || /invalid api key|unauthorized|forbidden/i.test(msg);
+}
+
 // The turn ran, called tools, and produced no words — the bug where a user
 // waited minutes and got a canned "…what else can i dig into?" back. The model
 // already has every tool result in front of it, so ask once more with NO tools
@@ -537,6 +547,10 @@ export async function runChatTurn({
       };
     } catch (err) {
       lastErr = err;
+      if (isKeyRejected(err)) {
+        console.error("[chat] provider rejected an API key — skipping it:", err);
+        continue;
+      }
       // Only quota/outage-shaped failures deserve the next model. A bug in our
       // own prompt or tools fails identically on every hop, so retrying buries
       // it under two more attempts and then surfaces it as if the free tier ran

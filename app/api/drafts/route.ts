@@ -9,6 +9,7 @@ import { db } from "@/lib/db";
 import { drafts, matches, jobs, companies, runs, profiles } from "@/db/schema";
 import { and, eq } from "drizzle-orm";
 import { getOrCreateUser, UUID_RX } from "@/lib/user";
+import { agentErrorMessage } from "@/lib/chat/errors";
 import {
   generateDrafts,
   type DraftProfile,
@@ -175,7 +176,10 @@ export async function POST(req: Request) {
       },
     );
   } catch (err) {
-    return Response.json({ error: (err as Error).message }, { status: 502 });
+    // Same rule as the chat route: the provider's own message (which has
+    // carried an API-key complaint and a billing link before now) is logged,
+    // never rendered. JobCard prints this string straight into the card.
+    return Response.json({ error: agentErrorMessage(err, "draft generation failed") }, { status: 502 });
   }
 
   // Replace any prior drafts for this match, then store the fresh pair.
