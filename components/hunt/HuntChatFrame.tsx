@@ -1,11 +1,10 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useRef } from "react";
 import { motion } from "framer-motion";
 import { ArrowLeft } from "lucide-react";
 import ConversationPanel from "@/components/chat/ConversationPanel";
 import GrassFrame from "./GrassFrame";
-import BlossomBorder from "./BlossomBorder";
 
 interface HuntChatFrameProps {
   onBack: () => void;
@@ -14,9 +13,6 @@ interface HuntChatFrameProps {
 
 export default function HuntChatFrame({ onBack, reducedMotion }: HuntChatFrameProps) {
   const panelRef = useRef<HTMLDivElement>(null);
-  // Temporary A/B: round 1's grass vs the woodcut blossom branch. Delete this
-  // state and the header control once one is picked.
-  const [borderStyle, setBorderStyle] = useState<"blossom" | "grass">("blossom");
 
   return (
     // The root must never be translated: it is full-width, so animating `x`
@@ -42,11 +38,10 @@ export default function HuntChatFrame({ onBack, reducedMotion }: HuntChatFramePr
         animate={{ x: 0 }}
         transition={{ type: "spring", stiffness: 220, damping: 28 }}
       >
-        {borderStyle === "blossom" ? (
-          <BlossomBorder panelRef={panelRef} reduced={reducedMotion} />
-        ) : (
-          <GrassFrame panelRef={panelRef} reduced={reducedMotion} />
-        )}
+        {/* The A/B against the woodcut blossom branch is settled: blossom was
+            costing frames on phones and users were being told to switch away
+            from it, so grass is simply the border now. */}
+        <GrassFrame panelRef={panelRef} reduced={reducedMotion} />
 
         <div
           ref={panelRef}
@@ -73,14 +68,10 @@ export default function HuntChatFrame({ onBack, reducedMotion }: HuntChatFramePr
             <span className="font-hunt text-sm font-bold uppercase tracking-[0.2em] text-bone/80">
               startHunt
             </span>
-            <button
-              type="button"
-              onClick={() => setBorderStyle((s) => (s === "blossom" ? "grass" : "blossom"))}
-              title="Switch border style"
-              className="rounded-full border border-bone/15 px-2.5 py-1 font-body text-[10px] uppercase tracking-[0.15em] text-bone/50 hover:text-bone/80"
-            >
-              {borderStyle}
-            </button>
+            {/* Holds the slot the border toggle vacated, so the title stays
+                optically centred against the back button. The account menu
+                lands here. */}
+            <div aria-hidden className="h-8 w-8" />
           </div>
 
           <div className="flex min-h-0 flex-1 flex-col font-body">

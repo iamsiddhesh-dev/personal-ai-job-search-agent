@@ -120,13 +120,23 @@ export default function ConversationPanel() {
             pushMessage({ role: "agent", kind: "text", text: event.message });
             historyRef.current.push({ role: "assistant", content: event.message });
           } else if (event.type === "error" && event.message) {
+            // Already written in the agent's voice by lib/chat/errors.ts, with
+            // the real error left in the server log. Render it as-is: prefixing
+            // it turns a normal-sounding line back into a crash report.
             setIsTyping(false);
-            pushMessage({ role: "agent", kind: "text", text: `something broke: ${event.message}` });
+            pushMessage({ role: "agent", kind: "text", text: event.message });
           }
         }
       }
     } catch (err) {
-      pushMessage({ role: "agent", kind: "text", text: `something broke: ${(err as Error).message}` });
+      // Network-level failure, so there is no server-authored line to show —
+      // stay in voice here too rather than printing a fetch error.
+      console.error("[chat] turn request failed:", err);
+      pushMessage({
+        role: "agent",
+        kind: "text",
+        text: "lost you there — connection dropped. try that again?",
+      });
     } finally {
       setIsTyping(false);
       setBusy(false);

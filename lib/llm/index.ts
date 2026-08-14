@@ -145,7 +145,9 @@ const TASK_ROUTES: Record<LlmTask, ModelStep[]> = {
   ],
 };
 
-function looksLikeQuotaOrServerError(err: unknown): boolean {
+// Exported so the chat route can tell "every free key is tapped" apart from a
+// real bug and say the honest thing about it, rather than showing a stack trace.
+export function looksLikeQuotaOrServerError(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err);
   return /429|quota|rate.?limit|RESOURCE_EXHAUSTED|5\d\d/i.test(msg);
 }
@@ -155,7 +157,10 @@ function looksLikeQuotaOrServerError(err: unknown): boolean {
 // prompt bug, but it also happens when a model doesn't truly enforce
 // json_schema — so retrying on the next provider is the right call. If it IS a
 // prompt bug, every step fails and the last error surfaces.
-function shouldFailOver(err: unknown): boolean {
+// Exported: the chat loop in lib/chat/agent.ts walks its own model chain and
+// must make the same call, so that a genuine code bug throws on the first hop
+// instead of being retried three times and surfacing as a quota problem.
+export function shouldFailOver(err: unknown): boolean {
   if (looksLikeQuotaOrServerError(err) || NoObjectGeneratedError.isInstance(err)) return true;
   // Groq's strict json_schema mode returns a 400 "Failed to validate JSON" when
   // the model can't satisfy the schema. Like NoObjectGeneratedError that's a
@@ -168,6 +173,14 @@ function shouldFailOver(err: unknown): boolean {
 // "try again in 1m30s"). Honor it when present so we wait the real amount
 // rather than a guess; cap it so a long daily-quota reset doesn't hang a
 // request that could just move to the next provider.
+//
+// The cap used to be 20s. Three providers deep that is a full minute of sleeping
+// inside one chat turn, which is most of the 2-3 minute waits users reported —
+// and the turn now has a 45s deadline (app/api/chat/route.ts) that such a sleep
+// would blow through on its own. If the wait is genuinely long, the next
+// provider is the better answer than waiting for this one.
+const RETRY_SLEEP_CAP_MS = 5000;
+
 function retryAfterMs(err: unknown): number {
   const msg = err instanceof Error ? err.message : String(err);
   const m = msg.match(/(?:retry|try again) in\s*(?:(\d+)m)?\s*([\d.]+)s/i);
@@ -175,7 +188,7 @@ function retryAfterMs(err: unknown): number {
     const mins = m[1] ? Number(m[1]) : 0;
     const secs = Number(m[2]);
     const total = (mins * 60 + secs) * 1000;
-    if (Number.isFinite(total)) return Math.min(total + 250, 20000);
+    if (Number.isFinite(total)) return Math.min(total + 250, RETRY_SLEEP_CAP_MS);
   }
   return 3000;
 }

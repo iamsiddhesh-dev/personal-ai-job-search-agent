@@ -14,12 +14,12 @@
 // provider measured to handle tools reliably (2/2), so the chat chain is Groq
 // first with Gemini kept as an emergency backstop.
 
-import { generateText, stepCountIs, tool, type ModelMessage } from "ai";
+import { generateText, stepCountIs, tool, type LanguageModel, type ModelMessage } from "ai";
 import { z } from "zod";
 import { eq } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { profiles } from "@/db/schema";
-import { chatModelChain } from "@/lib/llm";
+import { chatModelChain, shouldFailOver } from "@/lib/llm";
 import { getExcludedJobIds, listDueFollowups, markApplied } from "@/lib/applications";
 import { buildMatchProfileFromRow } from "@/lib/agent/build-profile";
 import { runMatch, type LocationPref, type TeamSizeBucket, type RankedMatch } from "@/lib/agent/match";
@@ -408,6 +408,65 @@ export interface ChatTurnInput {
   // so the only way to stop a meme repeating across turns is for the client to
   // hand back what it has seen — same pattern as the transcript itself.
   recentMemeIds?: string[];
+  // The turn deadline, owned by the route (app/api/chat/route.ts). Passed all
+  // the way down so an in-flight model call is actually cancelled at the
+  // deadline instead of running on against a stream nobody is reading — and so
+  // the chain stops being walked once there is no time left to walk it.
+  signal?: AbortSignal;
+}
+
+// The turn ran, called tools, and produced no words — the bug where a user
+// waited minutes and got a canned "…what else can i dig into?" back. The model
+// already has every tool result in front of it, so ask once more with NO tools
+// passed: it cannot spend another step calling something, and the only output
+// it can produce is text. What it says is decided by what actually happened,
+// because it is looking at it.
+async function closingText(params: {
+  model: LanguageModel;
+  system: string;
+  history: ModelMessage[];
+  responseMessages: ModelMessage[];
+  toolCallCount: number;
+  collectedJobs: RankedMatch[];
+  signal?: AbortSignal;
+}): Promise<string> {
+  const { model, system, history, responseMessages, toolCallCount, collectedJobs, signal } = params;
+
+  if (!signal?.aborted) {
+    try {
+      const forced = await generateText({
+        model,
+        system,
+        messages: [
+          ...history,
+          ...responseMessages,
+          {
+            role: "user",
+            content:
+              "(system: you spent this turn's whole tool budget and said nothing back. reply NOW in words, in your normal voice: one or two lines on what you just found or did, then the next step. no tools left to call.)",
+          },
+        ],
+        abortSignal: signal,
+      });
+      const text = forced.text.trim();
+      if (text) return text;
+    } catch (err) {
+      // One extra completion is a nicety, not a requirement — a failure here
+      // must not lose a turn whose tools already did the real work.
+      console.error("[chat] forced closing completion failed:", err);
+    }
+  }
+
+  // Last resort, decided by what the turn actually accomplished rather than a
+  // generic nudge. Jobs on screen with no words under them is the worst version
+  // of this bug, so that case gets a real sentence.
+  if (collectedJobs.length > 0) {
+    return `${collectedJobs.length} roles up there ☝️ — tell me which one to dig into.`;
+  }
+  if (toolCallCount > 0) {
+    return "looked into it and came back with nothing worth showing. want me to run a fresh search instead?";
+  }
+  return "arre my brain buffered there. say that again?";
 }
 
 // Run one turn of the conversation.
@@ -417,6 +476,7 @@ export async function runChatTurn({
   userId,
   summary,
   recentMemeIds = [],
+  signal,
 }: ChatTurnInput): Promise<ChatTurnResult> {
   const ctx: ToolContext = {
     userId,
@@ -438,6 +498,9 @@ export async function runChatTurn({
 
   let lastErr: unknown;
   for (const model of chain) {
+    // Out of time: another hop can only make the wait longer. Let the route's
+    // deadline handling say so in the agent's voice.
+    if (signal?.aborted) break;
     try {
       const result = await generateText({
         model,
@@ -446,11 +509,40 @@ export async function runChatTurn({
         tools,
         // Enough steps to look something up, act on it, then talk about it.
         stopWhen: stepCountIs(6),
+        abortSignal: signal,
       });
-      return { text: result.text.trim(), jobs: ctx.collectedJobs };
+
+      const text = result.text.trim();
+      if (text) return { text, jobs: ctx.collectedJobs };
+
+      // Tracing for whether the step budget is what's actually running out —
+      // the plan raises stepCountIs(6) only if this says it is.
+      console.warn("[chat] turn produced no text", {
+        steps: result.steps.length,
+        finishReason: result.finishReason,
+        toolCalls: result.toolCalls.map((c) => c.toolName),
+      });
+
+      return {
+        text: await closingText({
+          model,
+          system,
+          history,
+          responseMessages: result.responseMessages,
+          toolCallCount: result.toolCalls.length,
+          collectedJobs: ctx.collectedJobs,
+          signal,
+        }),
+        jobs: ctx.collectedJobs,
+      };
     } catch (err) {
       lastErr = err;
+      // Only quota/outage-shaped failures deserve the next model. A bug in our
+      // own prompt or tools fails identically on every hop, so retrying buries
+      // it under two more attempts and then surfaces it as if the free tier ran
+      // out. Throw it now, while it still looks like what it is.
+      if (!shouldFailOver(err)) throw err;
     }
   }
-  throw lastErr;
+  throw lastErr ?? new Error("Chat turn ran out of time before any model answered.");
 }
