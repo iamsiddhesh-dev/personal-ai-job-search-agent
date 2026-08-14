@@ -4,7 +4,9 @@ import {
   text,
   timestamp,
   integer,
+  bigserial,
   boolean,
+  index,
   jsonb,
   vector,
   real,
@@ -158,6 +160,66 @@ export const applications = pgTable("applications", {
   nextFollowupAt: timestamp("next_followup_at", { withTimezone: true }),
   notes: text("notes"),
 });
+
+// One chat thread. Before Phase B the transcript lived in a useRef on the
+// client and was replayed to a stateless /api/chat, so a refresh destroyed it.
+export const conversations = pgTable(
+  "conversations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id").notNull().references(() => users.id),
+    // The first user message, trimmed. Only for listing threads.
+    title: text("title"),
+
+    // The rolling summary, and how far into the thread it reaches. `summary`
+    // covers exactly the first `summaryThrough` messages and nothing past them,
+    // which is what lets each turn fold only what newly fell out of the raw
+    // window instead of re-summarizing the whole history. Get this count wrong
+    // and nothing errors — the agent just quietly forgets things.
+    summary: text("summary"),
+    summaryThrough: integer("summary_through").notNull().default(0),
+
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+    // Set by Phase C's "new chat". Archived threads are excluded from listings
+    // and hard-deleted by a sweep after 30 days.
+    archivedAt: timestamp("archived_at", { withTimezone: true }),
+  },
+  (t) => [index("conversations_user_updated_idx").on(t.userId, t.updatedAt.desc())],
+);
+
+export const messages = pgTable(
+  "messages",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    conversationId: uuid("conversation_id")
+      .notNull()
+      .references(() => conversations.id, { onDelete: "cascade" }),
+
+    // Insertion order, and the only ordering these rows may be read in.
+    // conversations.summaryThrough counts from the start of the thread, so it
+    // is only meaningful under a total order that cannot tie or shift —
+    // created_at can do both when one turn writes a meme and a reply
+    // milliseconds apart. Assigned by a sequence; never written by hand.
+    ordinal: bigserial("ordinal", { mode: "number" }).notNull(),
+
+    role: text("role").notNull(), // 'user' | 'assistant'
+    kind: text("kind").notNull().default("text"), // 'text' | 'jobs' | 'meme'
+
+    // Model-facing text: exactly what historyRef used to hold.
+    content: text("content").notNull(),
+
+    // UI-only extras. For a jobs card this is { matchIds }, NOT the hydrated
+    // RankedMatch[] — a search returns up to 40 matches and lib/agent/persist.ts
+    // already wrote all of it to `matches`, so re-inlining it here would
+    // duplicate ~40 KB of jsonb per message. Rehydrated by joining
+    // matches -> jobs -> companies (see lib/chat/conversations.ts).
+    display: jsonb("display"),
+
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("messages_conversation_ordinal_idx").on(t.conversationId, t.ordinal)],
+);
 
 export const drafts = pgTable("drafts", {
   id: uuid("id").primaryKey().defaultRandom(),

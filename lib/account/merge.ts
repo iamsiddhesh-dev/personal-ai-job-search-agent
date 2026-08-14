@@ -13,11 +13,17 @@
 
 import { and, eq, ne } from "drizzle-orm";
 import { db } from "@/lib/db";
-import { applications, profiles, runs, users } from "@/db/schema";
+import { applications, conversations, profiles, runs, users } from "@/db/schema";
 
 export type MergeResult =
   | { merged: false; reason: "same-user" | "source-missing" | "source-not-anonymous" | "target-missing" }
-  | { merged: true; movedRuns: number; movedApplications: number; profileKept: "target" | "source" | "none" };
+  | {
+      merged: true;
+      movedRuns: number;
+      movedApplications: number;
+      movedConversations: number;
+      profileKept: "target" | "source" | "none";
+    };
 
 export async function mergeUsers(fromAnonUserId: string, toUserId: string): Promise<MergeResult> {
   // Not a defensive nicety — without this the function would happily re-point
@@ -103,10 +109,25 @@ export async function mergeUsers(fromAnonUserId: string, toUserId: string): Prom
       .where(eq(applications.userId, fromAnonUserId))
       .returning({ id: applications.id });
 
-    // Phase B adds `conversations` (and `messages` hanging off it). When it
-    // does, re-point conversations here — the delete below will start failing
-    // with a foreign-key violation if that is forgotten, which is the failure
-    // mode to want.
+    // Conversations move across whole. `messages` hangs off conversation_id,
+    // not user_id, so it follows without being touched — same as matches and
+    // drafts following runs above.
+    //
+    // Unlike profiles, there is no "one must win" rule here: a user may have
+    // any number of threads, and both accounts' threads are theirs. The target
+    // simply ends up holding both sets. Nothing is merged INTO a thread, so
+    // there is no ordering hazard with summary_through either.
+    //
+    // This is also the step the comment that used to sit here was warning
+    // about: conversations.user_id is ON DELETE NO ACTION, so forgetting it
+    // would make the delete below fail with a foreign-key violation on the
+    // first anonymous user who saved a conversation and then signed in.
+    const movedConversations = await tx
+      .update(conversations)
+      .set({ userId: toUserId })
+      .where(eq(conversations.userId, fromAnonUserId))
+      .returning({ id: conversations.id });
+
     await tx.delete(users).where(and(eq(users.id, fromAnonUserId), ne(users.id, toUserId)));
 
     // The Supabase auth user behind the anonymous session is deliberately left
@@ -118,6 +139,7 @@ export async function mergeUsers(fromAnonUserId: string, toUserId: string): Prom
       merged: true as const,
       movedRuns: movedRuns.length,
       movedApplications: movedApplications.length,
+      movedConversations: movedConversations.length,
       profileKept: targetProfile ? ("target" as const) : sourceProfile ? ("source" as const) : ("none" as const),
     };
   });

@@ -5,12 +5,14 @@
 // reaches a terminal state — the composer stays live after results, drafts, or
 // anything else, so the user can keep going indefinitely.
 //
-// The client owns the transcript and replays it each turn; the server is
-// stateless. Resume upload still goes through /api/profile (a file can't travel
-// in a chat message), and its outcome is narrated back into the thread so the
-// agent can react to it on the next turn.
+// The thread lives on the SERVER since Phase B. It used to be a useRef here,
+// replayed to a stateless /api/chat every turn, which meant a refresh, a tab
+// close or the back button destroyed the whole conversation. Now this component
+// loads it on mount and sends only what is new. Resume upload still goes
+// through /api/profile (a file can't travel in a chat message), and its outcome
+// is narrated back into the thread so the agent can react to it next turn.
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import ChatThread from "./ChatThread";
 import Composer from "./Composer";
 import FollowupsBanner from "./FollowupsBanner";
@@ -26,35 +28,86 @@ const nextId = () => `m${++idCounter}`;
 // agent to react to yet.
 export const OPENER_DRAFT = "hey — i'm here, help me find startup jobs";
 
-interface Turn {
+interface ThreadMessage {
+  id: string;
   role: "user" | "assistant";
-  content: string;
+  kind: "text" | "jobs" | "meme";
+  text: string;
+  jobs?: RankedMatch[];
+  imageUrl?: string;
+  imageAlt?: string;
 }
 
 export default function ConversationPanel() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isTyping, setIsTyping] = useState(false);
   const [busy, setBusy] = useState(false);
+  // Blocks the composer until the stored thread is on screen, so a fast typer
+  // cannot start a second conversation in the half-second before their first
+  // one loads.
+  const [loading, setLoading] = useState(true);
 
-  // The model-facing transcript, kept separate from the rendered messages:
-  // job cards are UI-only, while tool outcomes we want the agent to remember
-  // get pushed here as plain text. Status lines (which stage a search is in,
-  // candidate counts, etc.) are internal instrumentation — they stay in the
-  // server console (see runMatch's log callback) and never reach either the
-  // transcript or the UI. What the user sees is only what a human would want
-  // to see: the typing indicator while something runs, then the actual reply.
-  const historyRef = useRef<Turn[]>([]);
-
-  // Curated meme ids already shown. Sent back with each turn so the server —
-  // which keeps no session — can avoid repeating an image.
-  const memeIdsRef = useRef<string[]>([]);
+  // The one piece of conversation state the client still holds: which thread
+  // this is. Everything in it lives in Postgres. A ref rather than state
+  // because runTurn reads it in the same tick it is set — the first turn of a
+  // new thread learns the id from the stream itself.
+  const conversationIdRef = useRef<string | null>(null);
 
   function pushMessage(msg: Omit<ChatMessage, "id">) {
     setMessages((prev) => [...prev, { id: nextId(), ...msg }]);
   }
 
-  // One agent turn: stream NDJSON events and fold them into the thread.
-  async function runTurn() {
+  // Resume the most recent thread, or start empty. Runs once, when the panel
+  // opens — which is also what makes the back-to-hero-and-re-enter round trip
+  // work, since this component unmounts with the chat stage.
+  useEffect(() => {
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const listRes = await fetch("/api/conversations");
+        if (!listRes.ok) return;
+        const { conversations } = (await listRes.json()) as {
+          conversations: { id: string }[];
+        };
+        const latest = conversations[0];
+        if (!latest || cancelled) return;
+
+        const threadRes = await fetch(`/api/conversations/${latest.id}`);
+        if (!threadRes.ok || cancelled) return;
+        const thread = (await threadRes.json()) as { messages: ThreadMessage[] };
+
+        conversationIdRef.current = latest.id;
+        setMessages(
+          thread.messages.map((m) => ({
+            id: m.id,
+            role: m.role === "assistant" ? ("agent" as const) : ("user" as const),
+            kind: m.kind,
+            text: m.text || undefined,
+            jobs: m.jobs,
+            imageUrl: m.imageUrl,
+            imageAlt: m.imageAlt,
+          })),
+        );
+      } catch (err) {
+        // An empty panel is a survivable failure — they can still type, and the
+        // first turn will start a fresh thread. Losing the old one silently is
+        // not great, so it goes in the console.
+        console.error("[chat] could not load the stored conversation:", err);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // One agent turn: send the new message, stream NDJSON events back and fold
+  // them into the thread. The server appends both sides to the conversation, so
+  // nothing here needs to keep a model-facing copy.
+  async function runTurn(message: string, displayText?: string) {
     setBusy(true);
     setIsTyping(true);
     try {
@@ -62,8 +115,9 @@ export default function ConversationPanel() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          messages: historyRef.current,
-          recentMemeIds: memeIdsRef.current,
+          conversationId: conversationIdRef.current,
+          message,
+          ...(displayText ? { displayText } : {}),
         }),
       });
       if (!res.body) throw new Error("no response stream from /api/chat");
@@ -82,16 +136,21 @@ export default function ConversationPanel() {
         for (const line of lines) {
           if (!line.trim()) continue;
           const event = JSON.parse(line) as {
-            type: "status" | "jobs" | "text" | "error" | "meme";
+            type: "conversation" | "status" | "jobs" | "text" | "error" | "meme";
             message?: string;
             jobs?: RankedMatch[];
             url?: string;
             alt?: string;
             caption?: string;
             memeId?: string;
+            conversationId?: string;
           };
 
-          if (event.type === "status") {
+          if (event.type === "conversation" && event.conversationId) {
+            // Sent once, on the turn that created the thread. Without it the
+            // next message would start another one.
+            conversationIdRef.current = event.conversationId;
+          } else if (event.type === "status") {
             // Internal instrumentation (which pipeline stage is running, candidate
             // counts, etc.) — never a UI concern. The typing indicator already
             // communicates "working on it" without exposing implementation detail.
@@ -107,18 +166,9 @@ export default function ConversationPanel() {
               imageAlt: event.alt,
               text: event.caption,
             });
-            if (event.memeId) memeIdsRef.current.push(event.memeId);
-            // Goes into the model-facing transcript too: without it the agent
-            // has no record of having sent a meme and will send another next
-            // turn, which is exactly the spam the pacing rule exists to stop.
-            historyRef.current.push({
-              role: "assistant",
-              content: `(sent a meme: ${event.alt ?? "reaction image"})`,
-            });
           } else if (event.type === "text" && event.message) {
             setIsTyping(false);
             pushMessage({ role: "agent", kind: "text", text: event.message });
-            historyRef.current.push({ role: "assistant", content: event.message });
           } else if (event.type === "error" && event.message) {
             // Already written in the agent's voice by lib/chat/errors.ts, with
             // the real error left in the server log. Render it as-is: prefixing
@@ -145,16 +195,21 @@ export default function ConversationPanel() {
 
   async function handleSubmit(value: string) {
     pushMessage({ role: "user", kind: "text", text: value });
-    historyRef.current.push({ role: "user", content: value });
-    await runTurn();
+    await runTurn(value);
   }
 
   // Resume upload. Parsed server-side, then the result is narrated into the
-  // transcript as a user turn so the agent responds to it naturally rather than
-  // the UI printing a canned confirmation.
+  // thread as a user turn so the agent responds to it naturally rather than the
+  // UI printing a canned confirmation.
+  //
+  // The narration and the bubble differ, which is what `displayText` is for:
+  // the model is told what was actually parsed out of the file, the user sees
+  // "📎 cv.pdf". Storing both is why a reload shows the attachment again
+  // instead of the "(system: …)" line the model was given.
   async function handleAttach(file: File, attachKind: AttachKind) {
     const label = attachKind === "linkedin" ? "linkedin pdf" : "resume";
-    pushMessage({ role: "user", kind: "text", text: `📎 ${file.name}` });
+    const bubble = `📎 ${file.name}`;
+    pushMessage({ role: "user", kind: "text", text: bubble });
     setBusy(true);
     setIsTyping(true);
 
@@ -167,28 +222,20 @@ export default function ConversationPanel() {
       setIsTyping(false);
       setBusy(false);
 
-      if (!res.ok) {
-        historyRef.current.push({
-          role: "user",
-          content: `(system: my ${label} upload failed — ${json.error ?? "unknown error"}. tell me what to try.)`,
-        });
-      } else {
-        const notes = (json.notes ?? []) as string[];
-        historyRef.current.push({
-          role: "user",
-          content: [
+      const narration = !res.ok
+        ? `(system: my ${label} upload failed — ${json.error ?? "unknown error"}. tell me what to try.)`
+        : [
             `(system: i uploaded my ${label} and it parsed. here's what you extracted: ${json.playback ?? "profile built"})`,
-            notes.length ? `(system note: ${notes.join("; ")})` : "",
+            (json.notes ?? []).length ? `(system note: ${(json.notes as string[]).join("; ")})` : "",
             json.canSearch === false
               ? "(system note: there still isn't enough to search on — ask for whatever is missing.)"
               : "",
             "react to this naturally, then keep going.",
           ]
             .filter(Boolean)
-            .join("\n"),
-        });
-      }
-      await runTurn();
+            .join("\n");
+
+      await runTurn(narration, bubble);
     } catch (err) {
       setIsTyping(false);
       setBusy(false);
@@ -201,8 +248,14 @@ export default function ConversationPanel() {
       <FollowupsBanner />
       <ChatThread messages={messages} isTyping={isTyping} />
       <Composer
-        disabled={busy || isTyping}
-        initialValue={messages.length === 0 ? OPENER_DRAFT : undefined}
+        // Composer seeds its textarea from initialValue on FIRST render only,
+        // so without a remount here the opener would never appear: the first
+        // render happens while the stored thread is still loading, when there
+        // is nothing to seed yet. Remounting is free — the box is empty and
+        // disabled for that whole window.
+        key={loading ? "loading" : "ready"}
+        disabled={busy || isTyping || loading}
+        initialValue={!loading && messages.length === 0 ? OPENER_DRAFT : undefined}
         onSubmit={handleSubmit}
         onAttach={handleAttach}
       />
