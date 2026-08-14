@@ -163,7 +163,18 @@ export async function POST(req: Request) {
       // Written only once the fold actually succeeded, and with exactly the
       // count it covers. Advancing this without a stored summary that reaches
       // that far is how the agent silently forgets things.
-      await storeSummary(conversationId, rolled, summaryThrough + fold.length);
+      //
+      // A false return means a concurrent turn had already folded further, so
+      // this fold was redundant and was dropped. `summary` still holds what was
+      // just computed, which is correct for THIS turn's prompt — it covers the
+      // same messages either way; it is only the stored watermark that keeps
+      // the other turn's further-along version.
+      const stored = await storeSummary(conversationId, rolled, summaryThrough + fold.length);
+      if (!stored) {
+        console.warn(
+          `[chat] rolling summary not stored — another turn on ${conversationId} folded further first.`,
+        );
+      }
     } catch (err) {
       // Summarization is an optimization, not a requirement. Keep the previous
       // summary, do NOT advance summaryThrough, and widen the raw window so the

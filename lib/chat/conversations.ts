@@ -19,7 +19,7 @@
 //     messages with no error anywhere; a user just finds the agent has
 //     forgotten them.
 
-import { and, asc, desc, eq, inArray, isNull } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, lt } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { companies, conversations, jobs, matches, messages, runs } from "@/db/schema";
 import type { RankedMatch } from "@/lib/agent/match";
@@ -141,6 +141,11 @@ export async function appendMessages(conversationId: string, toAppend: NewMessag
  * Reads from `summaryThrough` rather than reading the whole thread and slicing:
  * the folded prefix is already represented by `summary` and re-reading it every
  * turn is exactly the cost this phase exists to remove.
+ *
+ * The OFFSET is over ROWS, which is why individual messages must never be
+ * deleted from a thread — removing one from the middle shifts every later row
+ * down and the offset silently starts reading from the wrong place. Deleting a
+ * whole conversation is fine; its messages cascade and the count goes too.
  */
 export async function loadTurnContext(conversationId: string, summaryThrough: number) {
   return db
@@ -177,16 +182,34 @@ export async function recentMemeIds(conversationId: string, limit = 12): Promise
     .filter((id): id is string => typeof id === "string");
 }
 
-/** Advance the rolling summary. Only ever called with a summary that covers exactly `through` messages. */
+/**
+ * Advance the rolling summary. Only ever called with a summary that covers
+ * exactly `through` messages, which is what keeps the pair self-consistent:
+ * both halves are written in ONE statement, so no reader can ever see a
+ * `summaryThrough` that its `summary` does not actually reach.
+ *
+ * The `<` guard makes the watermark monotonic. Two turns posted to the same
+ * conversation at once (two tabs — the composer only serializes within one)
+ * both read the same starting point and both fold, and the slower one can land
+ * last carrying a LOWER `through`. That does not lose anything, because the
+ * messages past it simply stay unfolded and come back in the next window — but
+ * it drags the watermark backwards and makes the next turn re-summarize
+ * messages an earlier turn already paid for. Re-paying for LLM calls is the
+ * exact cost this whole phase exists to remove, so the older write is dropped.
+ *
+ * Returns false when that happened, which is informational, not an error.
+ */
 export async function storeSummary(
   conversationId: string,
   summary: string,
   through: number,
-): Promise<void> {
-  await db
+): Promise<boolean> {
+  const rows = await db
     .update(conversations)
     .set({ summary, summaryThrough: through })
-    .where(eq(conversations.id, conversationId));
+    .where(and(eq(conversations.id, conversationId), lt(conversations.summaryThrough, through)))
+    .returning({ id: conversations.id });
+  return rows.length > 0;
 }
 
 /**
