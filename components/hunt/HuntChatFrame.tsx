@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef } from "react";
+import { useCallback, useRef, useState } from "react";
 import { motion } from "framer-motion";
 import { ArrowLeft } from "lucide-react";
 import ConversationPanel from "@/components/chat/ConversationPanel";
@@ -14,6 +14,37 @@ interface HuntChatFrameProps {
 
 export default function HuntChatFrame({ onBack, reducedMotion }: HuntChatFrameProps) {
   const panelRef = useRef<HTMLDivElement>(null);
+
+  // Which thread the panel should OPEN. Null means "resume the most recent
+  // one", which is what every normal mount wants; only "new chat" ever names a
+  // specific id. Kept here rather than in the panel because the account menu —
+  // a sibling, not a child — is what triggers the switch.
+  const [openId, setOpenId] = useState<string | null>(null);
+
+  // Which thread the panel is actually IN, reported back up as it changes: the
+  // resumed one on mount, or the one the first turn of an empty thread created.
+  // This is what "new chat" archives.
+  //
+  // A ref, not state, and that is the point: the panel reports this during its
+  // own mount effect, so holding it in state would re-render this component,
+  // hand the panel a new prop, and make its load effect run a second time.
+  const activeIdRef = useRef<string | null>(null);
+
+  const startNewChat = useCallback(async () => {
+    const res = await fetch("/api/conversations", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      // Null on a panel nobody has typed in yet — there is simply nothing to
+      // retire, and the route treats it as optional for exactly that case.
+      body: JSON.stringify({ archiveId: activeIdRef.current }),
+    });
+    if (!res.ok) throw new Error(`new chat failed: ${res.status}`);
+    const { id } = (await res.json()) as { id: string };
+
+    // Set before the remount so the panel's own report cannot race it.
+    activeIdRef.current = id;
+    setOpenId(id);
+  }, []);
 
   return (
     // The root must never be translated: it is full-width, so animating `x`
@@ -72,11 +103,21 @@ export default function HuntChatFrame({ onBack, reducedMotion }: HuntChatFramePr
             {/* The slot the border toggle vacated. AccountMenu keeps the same
                 8x8 footprint even while loading, so the title stays optically
                 centred against the back button. */}
-            <AccountMenu />
+            <AccountMenu onNewChat={startNewChat} />
           </div>
 
           <div className="flex min-h-0 flex-1 flex-col font-body">
-            <ConversationPanel />
+            <ConversationPanel
+              // Remounted per thread on purpose: a key change resets the
+              // messages, the composer's seeded opener and the load effect in
+              // one move, where clearing each by hand would leave the previous
+              // thread's bubbles on screen for a frame.
+              key={openId ?? "latest"}
+              conversationId={openId}
+              onConversationChange={(id) => {
+                activeIdRef.current = id;
+              }}
+            />
           </div>
         </div>
       </motion.div>

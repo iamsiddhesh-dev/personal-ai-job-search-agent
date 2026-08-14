@@ -38,7 +38,23 @@ interface ThreadMessage {
   imageAlt?: string;
 }
 
-export default function ConversationPanel() {
+interface ConversationPanelProps {
+  /**
+   * Which thread to open. Null means "whichever they were last in", which is
+   * what a normal mount wants. A specific id is what "new chat" passes, and is
+   * why this is a prop at all: the panel used to always resume the most recent
+   * thread, which after archiving one would have resumed the thread BEFORE it
+   * rather than the empty one just created.
+   */
+  conversationId?: string | null;
+  /** Reports the live thread id up, so the account menu knows what to archive. */
+  onConversationChange?: (id: string | null) => void;
+}
+
+export default function ConversationPanel({
+  conversationId = null,
+  onConversationChange,
+}: ConversationPanelProps) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isTyping, setIsTyping] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -51,33 +67,54 @@ export default function ConversationPanel() {
   // this is. Everything in it lives in Postgres. A ref rather than state
   // because runTurn reads it in the same tick it is set — the first turn of a
   // new thread learns the id from the stream itself.
-  const conversationIdRef = useRef<string | null>(null);
+  const conversationIdRef = useRef<string | null>(conversationId);
+
+  // Kept in a ref so the mount effect below can call it without listing it as a
+  // dependency and re-running the whole thread load every time the parent
+  // hands down a new closure.
+  const onChangeRef = useRef(onConversationChange);
+  onChangeRef.current = onConversationChange;
+
+  // Every write to conversationIdRef goes through here, so the parent can never
+  // be holding an id the panel has already moved on from.
+  function setConversationId(id: string | null) {
+    conversationIdRef.current = id;
+    onChangeRef.current?.(id);
+  }
 
   function pushMessage(msg: Omit<ChatMessage, "id">) {
     setMessages((prev) => [...prev, { id: nextId(), ...msg }]);
   }
 
-  // Resume the most recent thread, or start empty. Runs once, when the panel
-  // opens — which is also what makes the back-to-hero-and-re-enter round trip
-  // work, since this component unmounts with the chat stage.
+  // Load the thread this panel is for: the one named by the prop, or the most
+  // recent live one when there is no prop. Runs once, when the panel opens —
+  // which is also what makes the back-to-hero-and-re-enter round trip work,
+  // since this component unmounts with the chat stage. "New chat" remounts it
+  // with a key, so this runs again for the new thread.
   useEffect(() => {
     let cancelled = false;
 
     (async () => {
       try {
-        const listRes = await fetch("/api/conversations");
-        if (!listRes.ok) return;
-        const { conversations } = (await listRes.json()) as {
-          conversations: { id: string }[];
-        };
-        const latest = conversations[0];
-        if (!latest || cancelled) return;
+        let openId = conversationId;
 
-        const threadRes = await fetch(`/api/conversations/${latest.id}`);
+        if (!openId) {
+          const listRes = await fetch("/api/conversations");
+          if (!listRes.ok) return;
+          const { conversations } = (await listRes.json()) as {
+            conversations: { id: string }[];
+          };
+          // Archived threads are already excluded server-side, so the most
+          // recent live one is the one they were last in.
+          openId = conversations[0]?.id ?? null;
+        }
+        if (!openId || cancelled) return;
+
+        const threadRes = await fetch(`/api/conversations/${openId}`);
         if (!threadRes.ok || cancelled) return;
         const thread = (await threadRes.json()) as { messages: ThreadMessage[] };
 
-        conversationIdRef.current = latest.id;
+        setConversationId(openId);
         setMessages(
           thread.messages.map((m) => ({
             id: m.id,
@@ -102,7 +139,7 @@ export default function ConversationPanel() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [conversationId]);
 
   // One agent turn: send the new message, stream NDJSON events back and fold
   // them into the thread. The server appends both sides to the conversation, so
@@ -149,7 +186,7 @@ export default function ConversationPanel() {
           if (event.type === "conversation" && event.conversationId) {
             // Sent once, on the turn that created the thread. Without it the
             // next message would start another one.
-            conversationIdRef.current = event.conversationId;
+            setConversationId(event.conversationId);
           } else if (event.type === "status") {
             // Internal instrumentation (which pipeline stage is running, candidate
             // counts, etc.) — never a UI concern. The typing indicator already
@@ -229,6 +266,12 @@ export default function ConversationPanel() {
             (json.notes ?? []).length ? `(system note: ${(json.notes as string[]).join("; ")})` : "",
             json.canSearch === false
               ? "(system note: there still isn't enough to search on — ask for whatever is missing.)"
+              : "",
+            // Only on a REPLACEMENT, never a first upload. The distinction is
+            // made server-side, where the previous resumePath is actually
+            // known; the agent cannot infer it from the parsed text.
+            json.replacedResume
+              ? "(system note: this REPLACED a resume they already had. offer them a clean chat — don't start one yourself.)"
               : "",
             "react to this naturally, then keep going.",
           ]

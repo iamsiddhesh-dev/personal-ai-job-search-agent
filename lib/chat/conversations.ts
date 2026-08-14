@@ -95,6 +95,37 @@ export async function createConversation(userId: string, title?: string): Promis
   return row.id;
 }
 
+/**
+ * Retire a thread. This is all "new chat" does to the old conversation — the
+ * messages stay exactly where they are, which is what makes reset genuinely
+ * different from delete: nothing the user said is destroyed, it just stops
+ * being the thread they are in. A sweep hard-deletes archived rows after 30
+ * days (scripts/sweep-conversations.ts).
+ *
+ * Scoped by userId inside the UPDATE rather than after a SELECT, so a stranger's
+ * id cannot be archived by racing the check. Returns false when nothing matched,
+ * which the route turns into a 404 — same rule as everywhere else here, since a
+ * 403 would confirm the id exists.
+ *
+ * Already-archived threads are excluded so a double-click cannot push
+ * `archived_at` forward and buy a thread another 30 days before the sweep sees
+ * it.
+ */
+export async function archiveConversation(userId: string, conversationId: string): Promise<boolean> {
+  const rows = await db
+    .update(conversations)
+    .set({ archivedAt: new Date() })
+    .where(
+      and(
+        eq(conversations.id, conversationId),
+        eq(conversations.userId, userId),
+        isNull(conversations.archivedAt),
+      ),
+    )
+    .returning({ id: conversations.id });
+  return rows.length > 0;
+}
+
 // Ownership check, kept in one place because every route needs it and the cost
 // of forgetting it is Phase 0's cross-tenant read all over again. Returns null
 // rather than throwing so callers can 404 — a 403 would confirm that the id
@@ -106,11 +137,30 @@ export async function loadOwnedConversation(userId: string, conversationId: stri
       title: conversations.title,
       summary: conversations.summary,
       summaryThrough: conversations.summaryThrough,
+      archivedAt: conversations.archivedAt,
     })
     .from(conversations)
     .where(and(eq(conversations.id, conversationId), eq(conversations.userId, userId)))
     .limit(1);
   return row ?? null;
+}
+
+/**
+ * Bring an archived thread back. Only one caller: a turn posted to a thread that
+ * "new chat" already archived, which happens whenever a second tab was left open
+ * on it.
+ *
+ * The alternative — 404 the turn, or store it anyway — both end badly. A 404
+ * strands a tab the user is actively typing in; storing into an archived thread
+ * writes their message somewhere no listing shows and the 30-day sweep will
+ * eventually delete, with nothing erroring in between. Someone still talking to
+ * a thread has un-retired it by definition, so say that in the row.
+ */
+export async function reviveConversation(conversationId: string): Promise<void> {
+  await db
+    .update(conversations)
+    .set({ archivedAt: null })
+    .where(eq(conversations.id, conversationId));
 }
 
 export async function appendMessages(conversationId: string, toAppend: NewMessage[]): Promise<void> {

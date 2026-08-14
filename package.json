@@ -23,6 +23,8 @@
     "migrate:auth": "node --env-file=.env node_modules/tsx/dist/cli.mjs scripts/migrate-auth.ts",
     "migrate:lock-postgrest": "node --env-file=.env node_modules/tsx/dist/cli.mjs scripts/migrate-lock-postgrest.ts",
     "migrate:conversations": "node --env-file=.env node_modules/tsx/dist/cli.mjs scripts/migrate-conversations.ts",
+    "sweep:conversations": "node --env-file=.env node_modules/tsx/dist/cli.mjs scripts/sweep-conversations.ts",
+    "sweep:conversations:ci": "node node_modules/tsx/dist/cli.mjs scripts/sweep-conversations.ts",
     "measure:tokens": "node --env-file=.env node_modules/tsx/dist/cli.mjs scripts/measure-chat-tokens.ts"
   },
   "dependencies": {

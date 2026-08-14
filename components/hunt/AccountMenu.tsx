@@ -6,11 +6,21 @@
 // the moment of value — the first resume upload or first search — never on
 // arrival, because the walk-up hero is what people responded to. This is only
 // the affordance for someone who goes looking for it.
+//
+// It opens a MENU either way, which it did not originally. Signed out, the
+// avatar used to fire the Google redirect straight from the click: one tap on a
+// small unlabelled circle and the visitor was on accounts.google.com, with no
+// step in between telling them whether they were signing into something they
+// already had or making something new. Now both are named, and the destructive
+// and reset actions are reachable without an account — an anonymous visitor's
+// conversations are real rows in Postgres, so "delete my data" means something
+// to them too.
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { LogOut, User } from "lucide-react";
+import { LogIn, LogOut, MessageSquarePlus, Trash2, User } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
 import { beginGoogle, hasPendingRetry, isSigningIn, setSigningIn } from "@/lib/account/googleSignIn";
+import { DeleteAccountDialog } from "./DeleteAccountDialog";
 
 type Account = {
   authConfigured: boolean;
@@ -23,7 +33,16 @@ type Account = {
   hasSignedInBefore: boolean;
 };
 
-export function AccountMenu() {
+interface AccountMenuProps {
+  /**
+   * Archives the thread on screen and opens a fresh one. Owned by
+   * HuntChatFrame, because the panel it swaps is this component's sibling
+   * rather than its child.
+   */
+  onNewChat?: () => Promise<void>;
+}
+
+export function AccountMenu({ onNewChat }: AccountMenuProps) {
   const [account, setAccount] = useState<Account | null>(null);
   const [open, setOpen] = useState(false);
   // Seeded from sessionStorage, not false: if this render is the page load
@@ -31,6 +50,7 @@ export function AccountMenu() {
   // very first paint, not flip to busy only once the account fetch below
   // resolves a moment later.
   const [busy, setBusy] = useState(() => isSigningIn());
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -75,23 +95,46 @@ export function AccountMenu() {
     return () => document.removeEventListener("mousedown", onDown);
   }, [open]);
 
-  const onPrimaryClick = useCallback(async () => {
-    if (account?.signedIn) {
-      setOpen((v) => !v);
-      return;
-    }
+  // The avatar opens the menu, signed in or not. It used to fire the Google
+  // redirect straight from this click when signed out, which meant one tap on a
+  // small unlabelled circle sent people to accounts.google.com with no warning
+  // and no way to tell whether they were about to sign in or create something.
+  const onPrimaryClick = useCallback(() => setOpen((v) => !v), []);
+
+  // Both entries end at the same Google consent screen and BOTH preserve what
+  // the visitor has done so far — that is worth stating, because two buttons
+  // side by side imply a consequence to picking wrong and here there is none.
+  // "link" upgrades this anonymous session in place, keeping the same auth uid.
+  // "signin" mints a session on the existing account and lib/account/merge.ts
+  // moves this session's rows onto it, via the cookie beginGoogle sets. The
+  // difference is only which leg is tried first; each falls back to the other.
+  //
+  // Which one is offered as the primary is driven by hasSignedInBefore for the
+  // same reason it always was: a browser that has signed in here before would
+  // only collide on linkIdentity and fall back anyway.
+  const startGoogle = useCallback(async (mode: "link" | "signin") => {
     setBusy(true);
-    // See beginGoogle's comment: a browser that has signed in with Google
-    // before skips the doomed linkIdentity attempt and goes straight to a
-    // normal sign-in, which the merge cookie set inside beginGoogle still
-    // carries the anonymous account's data across from.
-    const mode = account?.hasSignedInBefore ? "signin" : "link";
     const failure = await beginGoogle(mode);
     if (failure) {
       setBusy(false);
       console.error("[account] google sign-in failed:", failure);
     }
-  }, [account?.signedIn, account?.hasSignedInBefore]);
+  }, []);
+
+  const newChat = useCallback(async () => {
+    if (!onNewChat) return;
+    setBusy(true);
+    try {
+      await onNewChat();
+      setOpen(false);
+    } catch (err) {
+      // The old thread is still on screen and still theirs — nothing was lost,
+      // so this stays a console line rather than a scary dialog.
+      console.error("[account] could not start a new chat:", err);
+    } finally {
+      setBusy(false);
+    }
+  }, [onNewChat]);
 
   const signOut = useCallback(async () => {
     const supabase = createClient();
@@ -115,9 +158,9 @@ export function AccountMenu() {
         type="button"
         onClick={onPrimaryClick}
         disabled={busy}
-        aria-label={account.signedIn ? label : "Sign in with Google to save your chat"}
-        aria-haspopup={account.signedIn ? "menu" : undefined}
-        aria-expanded={account.signedIn ? open : undefined}
+        aria-label={account.signedIn ? label : "Account — sign in or sign up"}
+        aria-haspopup="menu"
+        aria-expanded={open}
         className="flex h-8 w-8 items-center justify-center overflow-hidden rounded-full bg-bone/10 text-bone hover:bg-bone/20 disabled:opacity-50"
       >
         {account.avatarUrl ? (
@@ -130,24 +173,92 @@ export function AccountMenu() {
         )}
       </button>
 
-      {account.signedIn && open && (
+      {open && (
         <div
           role="menu"
           className="absolute right-0 z-20 mt-2 w-56 overflow-hidden rounded-2xl border border-bone/10 bg-[#16161c] py-1 text-left shadow-xl"
         >
-          <p className="truncate px-3 py-2 font-body text-xs text-bone/50">{label}</p>
+          <p className="truncate px-3 py-2 font-body text-xs text-bone/50">
+            {account.signedIn ? label : "not signed in"}
+          </p>
+
+          {/* Signed out: two labelled ways in, rather than one unlabelled
+              redirect. Ordered by which leg beginGoogle would have picked
+              anyway, so the top entry is the one that costs a single hop. */}
+          {!account.signedIn &&
+            (account.hasSignedInBefore
+              ? ([
+                  { mode: "signin" as const, text: "Sign in with Google" },
+                  { mode: "link" as const, text: "Sign up with Google" },
+                ])
+              : ([
+                  { mode: "link" as const, text: "Sign up with Google" },
+                  { mode: "signin" as const, text: "Sign in with Google" },
+                ])
+            ).map((item) => (
+              <button
+                key={item.mode}
+                type="button"
+                role="menuitem"
+                onClick={() => startGoogle(item.mode)}
+                disabled={busy}
+                className="flex w-full items-center gap-2 px-3 py-2 font-body text-sm text-bone/80 hover:bg-bone/10 disabled:opacity-50"
+              >
+                <LogIn size={14} />
+                {item.text}
+              </button>
+            ))}
+
+          {!account.signedIn && (
+            <p className="border-b border-bone/10 px-3 pb-2 font-body text-xs text-bone/40">
+              keeps this chat on your account, on any device.
+            </p>
+          )}
+
+          {onNewChat && (
+            <button
+              type="button"
+              role="menuitem"
+              onClick={newChat}
+              disabled={busy}
+              className="flex w-full items-center gap-2 px-3 py-2 font-body text-sm text-bone/80 hover:bg-bone/10 disabled:opacity-50"
+            >
+              <MessageSquarePlus size={14} />
+              New chat
+            </button>
+          )}
+          {account.signedIn && (
+            <button
+              type="button"
+              role="menuitem"
+              onClick={signOut}
+              disabled={busy}
+              className="flex w-full items-center gap-2 px-3 py-2 font-body text-sm text-bone/80 hover:bg-bone/10 disabled:opacity-50"
+            >
+              <LogOut size={14} />
+              Sign out
+            </button>
+          )}
+          {/* Last, separated, and the only red thing in the menu — it sits one
+              click below "New chat" and the two must never be mistaken for each
+              other. The typed confirmation is in the dialog. */}
           <button
             type="button"
             role="menuitem"
-            onClick={signOut}
+            onClick={() => {
+              setOpen(false);
+              setConfirmingDelete(true);
+            }}
             disabled={busy}
-            className="flex w-full items-center gap-2 px-3 py-2 font-body text-sm text-bone/80 hover:bg-bone/10 disabled:opacity-50"
+            className="flex w-full items-center gap-2 border-t border-bone/10 px-3 py-2 font-body text-sm text-red-400 hover:bg-red-500/10 disabled:opacity-50"
           >
-            <LogOut size={14} />
-            Sign out
+            <Trash2 size={14} />
+            Delete my data
           </button>
         </div>
       )}
+
+      {confirmingDelete && <DeleteAccountDialog onClose={() => setConfirmingDelete(false)} />}
     </div>
   );
 }

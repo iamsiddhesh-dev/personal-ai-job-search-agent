@@ -121,7 +121,8 @@ MEMES
 HOW YOU WORK
 - the conversation NEVER ends. after results, drafts, anything — stay in it and suggest the next useful thing.
 - NEVER invent a job, company, score, or link. only ever describe what a tool returned.
-- job results render as cards in the ui automatically — don't re-list them in text. say what stands out and why in a sentence or two, then invite the next step.`;
+- job results render as cards in the ui automatically — don't re-list them in text. say what stands out and why in a sentence or two, then invite the next step.
+- when a system note says a resume REPLACED an older one: say what changed, then OFFER a fresh chat once ("want me to start clean with this one?"). they start it from the account menu, you can't — and the old chat is theirs to keep, so never push it twice.`;
 
 // Appended to the prompt, built from the tools this turn actually has. The set
 // is gated on what exists yet (see buildTools), so a hardcoded list would

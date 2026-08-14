@@ -4,6 +4,12 @@
 # hot path. The script is idempotent (only touches embedding IS NULL rows), so
 # each run resumes where the last left off and also embeds newly-harvested jobs.
 #
+# It also carries the project's scheduled housekeeping, which piggy-backs here
+# rather than on a second schedule: this workflow already runs 4x a day against
+# the same database, and it exists partly to keep the Supabase project from
+# auto-pausing after 7 days idle. Today that is the 30-day archived-conversation
+# sweep (Phase C).
+#
 # Trigger: "Run workflow" (workflow_dispatch) to start now, plus a schedule that
 # resumes/maintains automatically. Each run is bounded to ~5h20m so it stays
 # under GitHub's 6-hour job cap; the next run finishes any remainder.
@@ -34,6 +40,18 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      # Deliberately BEFORE the embed step, not after. The embed step runs for
+      # up to EMBED_BUDGET_MIN and the job's own timeout-minutes sits just above
+      # it, so anything queued behind it is the first thing cancelled on a slow
+      # run. This is a single DELETE over a small table — seconds — and putting
+      # it first means it cannot be starved by the backfill.
+      #
+      # Hard-deletes conversations archived by "new chat" more than 30 days ago;
+      # their messages cascade. See scripts/sweep-conversations.ts.
+      - name: Sweep archived conversations (30 days)
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: npm run sweep:conversations:ci
       - name: Embed jobs (Cohere, conservatively paced)
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}

@@ -11,6 +11,8 @@ import { eq } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { users } from "@/db/schema";
 import { getOrCreateUser } from "@/lib/user";
+import { AccountNotFoundError, deleteAccount } from "@/lib/account/delete";
+import { createClient } from "@/lib/supabase/server";
 import { supabaseAuthEnv } from "@/lib/supabase/env";
 import { GOOGLE_LINKED_COOKIE, MERGE_FROM_COOKIE } from "@/app/auth/callback/route";
 
@@ -71,4 +73,78 @@ export async function POST() {
   });
 
   return Response.json({ ok: true });
+}
+
+// The phrase the UI makes them type. Checked here as well as in the dialog: the
+// dialog is the affordance, this is the actual gate, and a request that reaches
+// this route without it did not come from that dialog.
+const CONFIRM_PHRASE = "delete everything";
+
+// "Delete my data" (SCALE-PLAN Phase C.3). Irreversible, and nothing here can
+// undo it — see lib/account/delete.ts for what that means for the ordering.
+//
+// Deliberately takes no user id: the account deleted is always the caller's,
+// resolved server-side exactly like every other route. An id in the body would
+// be an authorization decision made from a request body, which is Phase 0's
+// cross-tenant read with a delete on the end of it.
+export async function DELETE(req: Request) {
+  const body = (await req.json().catch(() => null)) as { confirm?: unknown } | null;
+  const confirm = typeof body?.confirm === "string" ? body.confirm.trim().toLowerCase() : "";
+  if (confirm !== CONFIRM_PHRASE) {
+    return Response.json({ error: `Type "${CONFIRM_PHRASE}" to confirm.` }, { status: 400 });
+  }
+
+  const userId = await getOrCreateUser();
+
+  // Read the cookie jar and build the auth client BEFORE the delete. Both are
+  // request-scoped and neither depends on the account still existing, but
+  // ordering them first keeps the irreversible step as the last thing that can
+  // fail — nothing after it can be retried.
+  const store = await cookies();
+  const supabase = await createClient();
+
+  let result;
+  try {
+    result = await deleteAccount(userId);
+  } catch (err) {
+    if (err instanceof AccountNotFoundError) {
+      // getOrCreateUser() just resolved this id, so reaching here means the row
+      // vanished between the two — a double-submitted delete, most likely.
+      // Nothing is left to delete, so the caller's intent is already satisfied.
+      return Response.json({ ok: true, alreadyGone: true });
+    }
+    console.error("[account] delete failed:", err);
+    // The transaction rolled back, so the account is intact. Say so, rather
+    // than leaving them believing their data is gone when it is not.
+    return Response.json(
+      { error: "Couldn't delete the account. Nothing was removed — try again." },
+      { status: 500 },
+    );
+  }
+
+  // Sign out AFTER the rows are gone. The session's auth user has just been
+  // deleted, so this can fail against the auth server — it is best-effort, and
+  // the explicit cookie clearing below is what actually guarantees this browser
+  // does not come back holding a session for an account that no longer exists.
+  try {
+    await supabase?.auth.signOut();
+  } catch (err) {
+    console.error("[account] sign-out after delete failed:", err);
+  }
+
+  // Every cookie that names the deleted account. sh_uid is the pre-Phase-A
+  // identity anchor and would otherwise point at a users row that is gone;
+  // sh_google_linked is the "this browser has signed in before" hint, which is
+  // no longer true of any account that exists. The sb-* cookies are Supabase's
+  // own session chunks — cleared by name because signOut may not have reached
+  // the auth server, and a stale session cookie is what would make the next
+  // page load fail instead of quietly starting them fresh.
+  store.delete("sh_uid");
+  store.delete(GOOGLE_LINKED_COOKIE);
+  store.delete(MERGE_FROM_COOKIE);
+  for (const cookie of store.getAll()) {
+    if (cookie.name.startsWith("sb-")) store.delete(cookie.name);
+  }
+
+  return Response.json({ ok: true, ...result });
 }

@@ -22,6 +22,7 @@ import {
   loadOwnedConversation,
   loadTurnContext,
   recentMemeIds,
+  reviveConversation,
   storeSummary,
   type NewMessage,
 } from "@/lib/chat/conversations";
@@ -129,6 +130,12 @@ export async function POST(req: Request) {
     conversationId = conversation.id;
     priorSummary = conversation.summary ?? undefined;
     summaryThrough = conversation.summaryThrough;
+
+    // A turn arriving on a thread that "new chat" already archived, which is
+    // what a second tab left open on it produces. Storing into it instead would
+    // put their message somewhere no listing shows and the 30-day sweep will
+    // eventually delete, with nothing erroring in between.
+    if (conversation.archivedAt) await reviveConversation(conversationId);
   } else {
     conversationId = await createConversation(userId, displayText || message);
     created = true;
