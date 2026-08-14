@@ -7,7 +7,8 @@
 
 import { db } from "@/lib/db";
 import { drafts, matches, jobs, companies, runs, profiles } from "@/db/schema";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
+import { getOrCreateUser, UUID_RX } from "@/lib/user";
 import {
   generateDrafts,
   type DraftProfile,
@@ -53,6 +54,32 @@ export async function POST(req: Request) {
   const { matchId, regenerate } = body;
   if (!matchId) {
     return Response.json({ error: "matchId is required." }, { status: 400 });
+  }
+  // A non-uuid reaching the uuid column is a Postgres error, i.e. a 500 on a
+  // public endpoint from any junk string. It can't match anything either, so
+  // answer it exactly like an id that isn't theirs.
+  if (!UUID_RX.test(matchId)) {
+    return Response.json({ error: "Match not found." }, { status: 404 });
+  }
+
+  // TENANCY. A match id is the only thing this route is given, and it is
+  // guessable-shaped, so ownership must be proven before ANYTHING is read —
+  // including the draft cache below, which is keyed on matchId alone and would
+  // otherwise hand a stranger's outreach text to whoever asked for it. The
+  // owner is `runs.userId`, one join up from the match.
+  //
+  // 404, never 403: a 403 would confirm the id exists and belongs to somebody,
+  // which is exactly the fact an enumerating caller is fishing for. From the
+  // outside, someone else's match and a nonexistent one look identical.
+  const userId = await getOrCreateUser();
+  const [owned] = await db
+    .select({ id: matches.id })
+    .from(matches)
+    .innerJoin(runs, eq(matches.runId, runs.id))
+    .where(and(eq(matches.id, matchId), eq(runs.userId, userId)))
+    .limit(1);
+  if (!owned) {
+    return Response.json({ error: "Match not found." }, { status: 404 });
   }
 
   // Return the cached drafts unless a fresh generation was explicitly asked for.

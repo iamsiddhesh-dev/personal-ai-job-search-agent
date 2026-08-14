@@ -1,9 +1,9 @@
 import { db } from "@/lib/db";
 import { profiles } from "@/db/schema";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { runMatch, type LocationPref, type TeamSizeBucket } from "@/lib/agent/match";
 import { buildMatchProfileFromRow } from "@/lib/agent/build-profile";
-import { getOrCreateUser } from "@/lib/user";
+import { getOrCreateUser, UUID_RX } from "@/lib/user";
 import { getExcludedJobIds } from "@/lib/applications";
 import { persistRun } from "@/lib/agent/persist";
 
@@ -26,14 +26,27 @@ export async function POST(req: Request) {
     return Response.json({ error: "profileId, roleFocus and locationPref are required." }, { status: 400 });
   }
 
-  const [row] = await db.select().from(profiles).where(eq(profiles.id, profileId)).limit(1);
+  // Resolved before the profile lookup, and before the stream opens:
+  // getOrCreateUser may set the identity cookie, and once the stream begins the
+  // response headers are already gone.
+  const userId = await getOrCreateUser();
+
+  // TENANCY. profileId comes from the request body, so the lookup is scoped to
+  // the caller — unscoped, any id searched (and persisted a run) against
+  // someone else's resume, skills and embedding. 404 rather than 403, so a
+  // probe can't tell "not yours" from "doesn't exist"; a non-uuid gets the same
+  // answer instead of a 500 out of the uuid column.
+  if (!UUID_RX.test(profileId)) {
+    return Response.json({ error: "Profile not found." }, { status: 404 });
+  }
+  const [row] = await db
+    .select()
+    .from(profiles)
+    .where(and(eq(profiles.id, profileId), eq(profiles.userId, userId)))
+    .limit(1);
   if (!row) {
     return Response.json({ error: "Profile not found." }, { status: 404 });
   }
-
-  // Resolved here, not inside start(): getOrCreateUser may set the identity
-  // cookie, and once the stream begins the response headers are already gone.
-  const userId = await getOrCreateUser();
 
   const encoder = new TextEncoder();
   const stream = new ReadableStream({

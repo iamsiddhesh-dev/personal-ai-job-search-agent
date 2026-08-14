@@ -20,8 +20,9 @@ const USER_COOKIE = "sh_uid";
 const ONE_YEAR_SECONDS = 60 * 60 * 24 * 365;
 
 // Guards against a junk cookie reaching the uuid column, where a malformed
-// value is a database error rather than a miss.
-const UUID_RX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+// value is a database error rather than a miss. Exported because request bodies
+// carrying ids (matchId, profileId) need the same guard for the same reason.
+export const UUID_RX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export async function getOrCreateUser(): Promise<string> {
   const store = await cookies();
