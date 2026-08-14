@@ -18,11 +18,14 @@ export type SupabaseAuthEnv = { url: string; anonKey: string };
 let warned = false;
 
 export function supabaseAuthEnv(): SupabaseAuthEnv | null {
-  // SUPABASE_URL already exists for file storage and points at the same
-  // project, so accept either spelling server-side rather than making the owner
-  // set the same URL twice. Only the NEXT_PUBLIC_ one is readable in the
-  // browser, where the unprefixed one is not inlined and reads as undefined.
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL;
+  // Both reads are the NEXT_PUBLIC_ spelling deliberately, even on the server
+  // where the unprefixed SUPABASE_URL is right there and points at the same
+  // project. Accepting that fallback made the two sides disagree: the server
+  // built a client and reported auth as configured, while the browser — which
+  // only ever sees inlined NEXT_PUBLIC_ vars — could not build one at all, so
+  // the account menu offered a sign-in button that failed on click. One source
+  // of truth is worth setting the URL twice.
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
   const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
 
   if (!url || !anonKey) {
