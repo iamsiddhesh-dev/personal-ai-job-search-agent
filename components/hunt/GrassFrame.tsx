@@ -12,10 +12,9 @@ interface GrassFrameProps {
 }
 
 // A living border of hand-drawn grass and plum blossoms, planted along the
-// chat panel's own rounded-rect perimeter (the same math the liquid-metal
-// blob uses to sweep its border). Motion is pure CSS keyframes, not rAF —
-// the blob demo already runs a WebGL context on this origin, so a second
-// per-frame animation loop here would be wasteful.
+// chat panel's own rounded-rect perimeter via roundedRectPoint. Motion is pure
+// CSS keyframes, not rAF: this border animates for as long as the chat is open,
+// and frame cost on phones is exactly what settled the blossom A/B.
 export default function GrassFrame({ panelRef, reduced }: GrassFrameProps) {
   const [field, setField] = useState<GrassField | null>(null);
 

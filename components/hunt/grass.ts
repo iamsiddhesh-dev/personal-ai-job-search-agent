@@ -29,8 +29,7 @@ export interface GrassField {
   viewBoxSize: { width: number; height: number };
 }
 
-// Local outward normal at perimeter position t, via finite-difference tangent
-// — same technique as the liquid-metal border's tube sweep.
+// Local outward normal at perimeter position t, via finite-difference tangent.
 function outwardNormal(t: number, halfW: number, halfH: number, r: number): [number, number] {
   const [x1, y1] = roundedRectPoint(t, halfW, halfH, r);
   const [x2, y2] = roundedRectPoint(t + 0.002, halfW, halfH, r);
