@@ -147,9 +147,27 @@ const TASK_ROUTES: Record<LlmTask, ModelStep[]> = {
 
 // Exported so the chat route can tell "every free key is tapped" apart from a
 // real bug and say the honest thing about it, rather than showing a stack trace.
+//
+// The HTTP status is checked FIRST because it is the fact; the text is a guess.
+// Matching `/5\d\d/` against a message was both too loose (any "512 tokens"
+// reads as a server error) and too tight — Groq's real overload message is
+// "This model is currently experiencing high demand", which contains no code,
+// no "quota" and no "rate limit", and so was being reported to users as an
+// unexplained glitch when it is exactly the capacity problem we have honest
+// copy for. Seen live on 2026-08-14.
 export function looksLikeQuotaOrServerError(err: unknown): boolean {
+  const status = (err as { statusCode?: number })?.statusCode;
+  if (typeof status === "number" && (status === 429 || status >= 500)) return true;
+
+  // Named conditions only — no bare `5\d\d`. A raw three-digit match reads
+  // "prompt is 512 tokens over the window" as a server outage, which would put
+  // a rate-limit apology in front of a user whose real problem is something
+  // else entirely. If a genuine 5xx has no status attached, it says what it is
+  // in words.
   const msg = err instanceof Error ? err.message : String(err);
-  return /429|quota|rate.?limit|RESOURCE_EXHAUSTED|5\d\d/i.test(msg);
+  return /\b429\b|quota|rate.?limit|RESOURCE_EXHAUSTED|high demand|overload|at capacity|temporarily unavailable|service unavailable|internal server error|bad gateway|gateway timeout|try again later/i.test(
+    msg,
+  );
 }
 
 // Reasons to move to the next step in a chain: a quota/server outage, or the

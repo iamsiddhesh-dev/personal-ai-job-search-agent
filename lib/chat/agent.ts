@@ -520,6 +520,12 @@ export async function runChatTurn({
         // Enough steps to look something up, act on it, then talk about it.
         stopWhen: stepCountIs(6),
         abortSignal: signal,
+        // The SDK's default is 3 attempts per call, with backoff — that error
+        // users saw literally said "Failed after 3 attempts". Three attempts on
+        // the same throttled key, times every entry in the chain, is dead time
+        // inside a 45s budget. We have our own chain: moving to a different key
+        // clears a per-key limit instantly, where retrying cannot.
+        maxRetries: 1,
       });
 
       const text = result.text.trim();
