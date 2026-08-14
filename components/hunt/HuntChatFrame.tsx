@@ -5,6 +5,7 @@ import { motion } from "framer-motion";
 import { ArrowLeft } from "lucide-react";
 import ConversationPanel from "@/components/chat/ConversationPanel";
 import GrassFrame from "./GrassFrame";
+import { AccountMenu } from "./AccountMenu";
 
 interface HuntChatFrameProps {
   onBack: () => void;
@@ -68,10 +69,10 @@ export default function HuntChatFrame({ onBack, reducedMotion }: HuntChatFramePr
             <span className="font-hunt text-sm font-bold uppercase tracking-[0.2em] text-bone/80">
               startHunt
             </span>
-            {/* Holds the slot the border toggle vacated, so the title stays
-                optically centred against the back button. The account menu
-                lands here. */}
-            <div aria-hidden className="h-8 w-8" />
+            {/* The slot the border toggle vacated. AccountMenu keeps the same
+                8x8 footprint even while loading, so the title stays optically
+                centred against the back button. */}
+            <AccountMenu />
           </div>
 
           <div className="flex min-h-0 flex-1 flex-col font-body">
