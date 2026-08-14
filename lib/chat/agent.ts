@@ -234,10 +234,19 @@ export function buildTools(ctx: ToolContext, gate: ToolGate): ToolSet {
     saveProfile: tool({
       description:
         "Store their name, a GitHub URL/username, or a portfolio URL, the moment they give it — otherwise it is lost when the conversation compacts. Not for resumes or LinkedIn PDFs; those come through the attach button.",
+      // .nullable().optional(), not just .nullable(). Nullable alone leaves all
+      // three in the JSON Schema's `required` list, and Groq validates tool
+      // calls against it strictly: a model that sends `{"name":"Meera Iyer"}` —
+      // which is the correct call, and the one it actually makes when someone
+      // only gives their name — is rejected with
+      //   tool call validation failed: missing properties: 'githubUrl', 'portfolioUrl'
+      // as a 400. That is not retryable and not a quota problem, so the turn
+      // dies and the user gets the generic "something glitched" line. Observed
+      // live on the very first thing a new visitor does: say their name.
       inputSchema: z.object({
-        name: z.string().nullable().describe("their name, exactly as given"),
-        githubUrl: z.string().nullable().describe("github url or bare username"),
-        portfolioUrl: z.string().nullable().describe("personal site / portfolio url"),
+        name: z.string().nullable().optional().describe("their name, exactly as given"),
+        githubUrl: z.string().nullable().optional().describe("github url or bare username"),
+        portfolioUrl: z.string().nullable().optional().describe("personal site / portfolio url"),
       }),
       execute: async ({ name, githubUrl, portfolioUrl }) => {
         if (!name && !githubUrl && !portfolioUrl) {
@@ -351,7 +360,13 @@ export function buildTools(ctx: ToolContext, gate: ToolGate): ToolSet {
       inputSchema: z.object({
         company: z.string(),
         roleTitle: z.string(),
-        jobId: z.string().nullable().describe("the job's id if it came from a result card, else null"),
+        // Optional for the same reason as saveProfile's fields above: a model
+        // that omits it rather than sending null gets the whole turn 400'd.
+        jobId: z
+          .string()
+          .nullable()
+          .optional()
+          .describe("the job's id if it came from a result card, else null"),
       }),
       execute: async ({ company, roleTitle, jobId }) => {
         const id = await markApplied({

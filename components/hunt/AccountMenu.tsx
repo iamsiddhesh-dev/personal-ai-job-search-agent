@@ -21,6 +21,7 @@ import { LogIn, LogOut, MessageSquarePlus, Trash2, User } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
 import { beginGoogle, hasPendingRetry, isSigningIn, setSigningIn } from "@/lib/account/googleSignIn";
 import { DeleteAccountDialog } from "./DeleteAccountDialog";
+import { NewChatDialog } from "./NewChatDialog";
 
 type Account = {
   authConfigured: boolean;
@@ -50,6 +51,7 @@ export function AccountMenu({ onNewChat }: AccountMenuProps) {
   // very first paint, not flip to busy only once the account fetch below
   // resolves a moment later.
   const [busy, setBusy] = useState(() => isSigningIn());
+  const [confirmingNewChat, setConfirmingNewChat] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
 
@@ -120,21 +122,6 @@ export function AccountMenu({ onNewChat }: AccountMenuProps) {
       console.error("[account] google sign-in failed:", failure);
     }
   }, []);
-
-  const newChat = useCallback(async () => {
-    if (!onNewChat) return;
-    setBusy(true);
-    try {
-      await onNewChat();
-      setOpen(false);
-    } catch (err) {
-      // The old thread is still on screen and still theirs — nothing was lost,
-      // so this stays a console line rather than a scary dialog.
-      console.error("[account] could not start a new chat:", err);
-    } finally {
-      setBusy(false);
-    }
-  }, [onNewChat]);
 
   const signOut = useCallback(async () => {
     const supabase = createClient();
@@ -219,7 +206,10 @@ export function AccountMenu({ onNewChat }: AccountMenuProps) {
             <button
               type="button"
               role="menuitem"
-              onClick={newChat}
+              onClick={() => {
+                setOpen(false);
+                setConfirmingNewChat(true);
+              }}
               disabled={busy}
               className="flex w-full items-center gap-2 px-3 py-2 font-body text-sm text-bone/80 hover:bg-bone/10 disabled:opacity-50"
             >
@@ -258,6 +248,9 @@ export function AccountMenu({ onNewChat }: AccountMenuProps) {
         </div>
       )}
 
+      {confirmingNewChat && onNewChat && (
+        <NewChatDialog onConfirm={onNewChat} onClose={() => setConfirmingNewChat(false)} />
+      )}
       {confirmingDelete && <DeleteAccountDialog onClose={() => setConfirmingDelete(false)} />}
     </div>
   );
