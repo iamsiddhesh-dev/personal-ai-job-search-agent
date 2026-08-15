@@ -3,16 +3,20 @@
 // quality from here.
 //
 // Stages, in order:
-//   1. Rule filter (SQL)  — role keywords, location/remote, team-size bucket,
-//        is_active, exclude already-seen, AND a seniority/years gate so a
-//        fresher is never shown "6+ years / Senior / Staff" roles (title
-//        exclusion here; the JD "N+ years" parse is applied just after).
-//   2. Vector rank (JS)   — cosine similarity, profile embedding vs each
-//        candidate's PRE-COMPUTED job embedding -> top ~60. This stage NEVER
-//        embeds at request time: job embeddings are backfilled offline by the
-//        harvester (scripts/embed-jobs.ts), so a live search reads vectors and
-//        waits on nothing. Using the same premium Gemini model offline means
-//        zero quality loss and seconds, not minutes, of latency.
+//   1+2. Rule filter and vector rank (both SQL, one query) — role keywords,
+//        location/remote, team-size bucket, is_active, exclude already-seen,
+//        AND a seniority/years gate so a fresher is never shown "6+ years /
+//        Senior / Staff" roles (title exclusion here; the JD "N+ years" parse
+//        is applied just after, in JS, since it is not a regex). Then exact
+//        cosine similarity between the profile embedding and each candidate's
+//        PRE-COMPUTED job embedding, ordered and cut in Postgres. This stage
+//        NEVER embeds at request time: job embeddings are backfilled offline by
+//        the harvester (scripts/embed-jobs.ts), so a live search reads vectors
+//        and waits on nothing.
+//        These were two stages until Phase D, with the ranking looping in
+//        JavaScript over up to 1500 whole job rows shipped out of Postgres —
+//        up to 22.5 MB per search, measured, against a 5 GB/month egress
+//        allowance. Ranking in place sends the vectors nowhere.
 //   3. LLM re-rank        — scores those ~60 (in token-safe batches, see
 //        RERANK_BATCH_SIZE) on true-capability overlap (real experience first,
 //        projects second), requirement/seniority match, location
@@ -26,7 +30,7 @@
 
 import { db } from "@/lib/db";
 import { jobs, companies } from "@/db/schema";
-import { and, eq, or, ilike, sql, notInArray, type SQL } from "drizzle-orm";
+import { and, eq, or, ilike, sql, notInArray, isNotNull, type SQL } from "drizzle-orm";
 import { extractStructured } from "@/lib/llm";
 import { CACHE_TTL_MS } from "@/lib/llm/cache";
 import { mapLimit, UA } from "@/lib/sources/http";
@@ -88,8 +92,13 @@ export interface MatchOptions {
   // shown; dropSeniorTitles = exclude Senior/Staff/Lead/… titles outright.
   maxYearsRequired?: number;
   dropSeniorTitles?: boolean;
-  candidateCap?: number; // ranking-pool ceiling; default 1500
+  candidateCap?: number; // rows the SQL shortlist returns for the JD gates to cut into; default max(150, 6*topK)
   vectorTopK?: number; // hand-off size to the LLM; default 24 (3 batches of 8)
+  // Oldest posting the shortlist will consider, in days. Unset by default: an
+  // age bound changes what the matcher returns, which belongs to the
+  // match-quality plan, not here. Measured costs are documented next to
+  // IMPLAUSIBLE_POSTED_BEFORE.
+  maxPostingAgeDays?: number;
   // Selection is now score-threshold-based, not a fixed top-N: every candidate
   // the LLM scores >= minScore is returned (real fit, whatever the count),
   // relaxed to minScoreFallback if that's too sparse to be useful, capped at
@@ -317,17 +326,42 @@ interface Candidate {
   salaryMax: number | null;
   applyUrl: string | null;
   source: string;
-  embedding: unknown;
   companyName: string;
   teamSize: number | null;
   ycBatch: string | null;
 }
 
-async function ruleFilter(
+// 484 active rows carry a posted_at somewhere around the Unix epoch — bad data
+// from a source parser, not a real posting date. They were harmless while the
+// old query ordered by `posted_at desc` and cut at 1500, because a 1970 date
+// sorts last and never reached the ranking. Ranking over the whole corpus makes
+// them reachable: one showed up at rank 17 of a real "any role" search, dated
+// 20,659 days ago. Excluding an impossible date is a data-validity guard, not a
+// freshness policy — the age at which a REAL posting stops being worth showing
+// is a match-quality question, deliberately left to `maxPostingAgeDays` and the
+// separate match-quality plan (see below).
+const IMPLAUSIBLE_POSTED_BEFORE = "1990-01-01";
+
+// Bounding the shortlist by posting age was measured and deliberately NOT made
+// the default, even though the numbers look tempting in isolation: against the
+// real corpus a 180-day bound changes a broad search's top-24 mean cosine by
+// 0.0001 (0.4306 vs 0.4307) while dropping the oldest result to 164 days.
+//
+// It is not free, though — that measurement was taken on a broad search, where
+// the old path's recency cap was already hiding old postings. On NARROW
+// searches the old path had no age bound at all, and adding one moves 6-14 of
+// the top 24. That is a change to what the matcher returns, which SCALE-PLAN
+// scopes to the match-quality plan rather than to this phase. The knob and the
+// numbers are here for whoever writes that plan: 90 days costs -0.6% mean
+// cosine, 30 days costs -5.5%.
+
+// The rule filter's WHERE clause, shared so the shortlist query and anything
+// that needs to count against the same population cannot drift apart.
+function matchConditions(
   opts: MatchOptions,
   dropSeniorTitles: boolean,
   profileLocation: string | null,
-): Promise<Candidate[]> {
+): SQL[] {
   // Skip the title filter entirely for an "any" role search (show all job types).
   const roleCond = isAnyRole(opts.roleFocus)
     ? undefined
@@ -335,6 +369,15 @@ async function ruleFilter(
 
   const conds: (SQL | undefined)[] = [
     eq(jobs.isActive, true),
+    // Was a JS skip-and-count inside vectorRank. As a SQL condition it also
+    // keeps unembedded rows from occupying slots in the LIMIT below, which
+    // matters now that the LIMIT is the whole ranking window rather than a
+    // 1500-row pool the ranking then searched.
+    isNotNull(jobs.embedding),
+    sql`${jobs.postedAt} > ${IMPLAUSIBLE_POSTED_BEFORE}::timestamptz`,
+    opts.maxPostingAgeDays === undefined
+      ? undefined
+      : sql`${jobs.postedAt} > now() - make_interval(days => ${opts.maxPostingAgeDays}::int)`,
     roleCond,
     locationCondition(opts.locationPref, profileLocation),
     teamSizeCondition(opts.teamSizeBucket),
@@ -345,8 +388,71 @@ async function ruleFilter(
   if (opts.excludeJobIds && opts.excludeJobIds.length > 0) {
     conds.push(notInArray(jobs.id, opts.excludeJobIds));
   }
+  return conds.filter((c): c is SQL => c !== undefined);
+}
 
-  return db
+// Stages 1 and 2 in one query: rule filter, then cosine rank, then LIMIT — all
+// in Postgres.
+//
+// This replaces a rule filter that selected up to 1500 whole job rows —
+// INCLUDING every `description` and every 1024-dim `embedding` — and then
+// looped cosine similarity over them in JavaScript. Measured on the real corpus
+// before the change, one search pulled between 0.6 MB and 22.5 MB out of the
+// database (an "any role" search was the 22.5 MB case) against a 5 GB/month
+// free egress allowance, which is a few hundred searches a month for the whole
+// site. Ranking where the data already lives sends the vectors nowhere.
+//
+// The ordering is EXACT, not approximate.
+//
+// SCALE-PLAN Phase D.4 asks for an `hnsw (embedding vector_cosine_ops)` index
+// here. It is deliberately NOT part of this change, on measurements taken
+// against the live corpus (15,514 active embedded rows):
+//
+//   - The egress this stage exists to fix is already fixed without it. The win
+//     comes from not shipping 1500 descriptions and 1500 embeddings to the app,
+//     not from how Postgres finds the top 150: 8.35 MB -> 0.64 MB per search,
+//     measured over 18 real profile/search combinations. An index changes that
+//     number by nothing.
+//   - Exact ordering is not slow enough to matter. EXPLAIN ANALYZE puts the
+//     full scan at ~100 ms server-side, filtered or broad, inside a search turn
+//     whose LLM re-rank alone is ~9 s cold. An approximate index would trade a
+//     recall risk for roughly 1% of the turn.
+//   - It cannot even be built through this app's connection string. DATABASE_URL
+//     is Supabase's TRANSACTION pooler (see lib/db.ts), where `SET` does not
+//     survive to the next statement — verified: `SET
+//     max_parallel_maintenance_workers = 0` followed by `SHOW` returns nothing.
+//     So the build cannot be forced serial, and the parallel one dies on the
+//     free tier: "could not resize shared memory segment to 265318816 bytes: No
+//     space left on device". Building it needs a session-mode connection.
+//   - It is not free on disk. ~4.2 KB/row for 1024 dims at the default m=16 is
+//     roughly 65 MB, against a `jobs` table already at 248 MB of a 500 MB
+//     free-tier database.
+//
+// If the corpus grows enough that ~100 ms becomes ~1 s, revisit it — with a
+// direct connection, a serial build, and a recall check against this exact
+// path, which is the baseline it would have to match.
+//
+// One deliberate behaviour change comes with it. The old query ordered by
+// `posted_at desc` and cut at 1500 BEFORE ranking, so on a broad search the
+// vector stage only ever saw the 1500 freshest matching rows and a better
+// semantic match outside that window was invisible. That cap existed to bound
+// the egress this function just removed, so it is gone: ranking now runs over
+// every row matching the filter, and recency stops silently overriding fit.
+async function shortlistByVector(
+  opts: MatchOptions,
+  dropSeniorTitles: boolean,
+  profileLocation: string | null,
+  profileEmbedding: number[],
+  limit: number,
+): Promise<Ranked[]> {
+  // pgvector's text input form. Sent as a bound parameter, so ~20 KB goes UP
+  // per search — the direction that is not metered.
+  const vec = sql`${`[${profileEmbedding.join(",")}]`}::vector`;
+  // Written once and used as both the sort key and an output column, so
+  // Postgres evaluates it once per row rather than twice.
+  const distance = sql<number>`${jobs.embedding} <=> ${vec}`;
+
+  const rows = await db
     .select({
       jobId: jobs.id,
       title: jobs.title,
@@ -357,17 +463,24 @@ async function ruleFilter(
       salaryMax: jobs.salaryMax,
       applyUrl: jobs.applyUrl,
       source: jobs.source,
-      embedding: jobs.embedding,
       companyName: companies.name,
       teamSize: companies.teamSize,
       ycBatch: companies.ycBatch,
+      distance,
     })
     .from(jobs)
     .innerJoin(companies, eq(jobs.companyId, companies.id))
-    .where(and(...conds.filter((c): c is SQL => c !== undefined)))
-    // Prefer fresh roles when the cap bites.
-    .orderBy(sql`${jobs.postedAt} desc nulls last`, sql`${jobs.lastSeenAt} desc`)
-    .limit(opts.candidateCap ?? 1500) as Promise<Candidate[]>;
+    .where(and(...matchConditions(opts, dropSeniorTitles, profileLocation)))
+    .orderBy(distance)
+    .limit(limit);
+
+  return rows.map(({ distance: d, ...cand }) => ({
+    cand: cand as Candidate,
+    // `<=>` is cosine DISTANCE (1 - similarity). Everything downstream — the
+    // log line, the rerank prompt, `RankedMatch.vectorScore` — speaks
+    // similarity, which is also what the JS `cosine()` returned.
+    vectorScore: 1 - Number(d),
+  }));
 }
 
 // Parse the strictest "N years (of) experience" requirement out of a JD. Returns
@@ -422,21 +535,6 @@ function stripHtml(s: string): string {
     .trim();
 }
 
-// pgvector comes back over the wire as a "[1,2,...]" string (or already an
-// array depending on the driver path). Normalize either into number[].
-function toVec(v: unknown): number[] | null {
-  if (Array.isArray(v)) return v as number[];
-  if (typeof v === "string") {
-    try {
-      const parsed = JSON.parse(v);
-      return Array.isArray(parsed) ? parsed : null;
-    } catch {
-      return null;
-    }
-  }
-  return null;
-}
-
 export function jobEmbeddingText(j: {
   title: string;
   companyName: string;
@@ -448,50 +546,9 @@ export function jobEmbeddingText(j: {
   return `${j.title}\n${j.companyName} — ${j.location ?? "location n/a"} — team ${j.teamSize ?? "?"}\n${desc}`;
 }
 
-function cosine(a: number[], b: number[]): number {
-  let dot = 0;
-  let na = 0;
-  let nb = 0;
-  const n = Math.min(a.length, b.length);
-  for (let i = 0; i < n; i++) {
-    dot += a[i] * b[i];
-    na += a[i] * a[i];
-    nb += b[i] * b[i];
-  }
-  if (na === 0 || nb === 0) return 0;
-  return dot / (Math.sqrt(na) * Math.sqrt(nb));
-}
-
-// ---------------------------------------------------------------------------
-// Stage 2 — vector rank (reads pre-computed embeddings; never embeds here)
-// ---------------------------------------------------------------------------
-
 interface Ranked {
   cand: Candidate;
   vectorScore: number;
-}
-
-function vectorRank(
-  profileEmbedding: number[],
-  candidates: Candidate[],
-  topK: number,
-  log: (m: string) => void,
-): Ranked[] {
-  const ranked: Ranked[] = [];
-  let notEmbedded = 0;
-  for (const c of candidates) {
-    const vec = toVec(c.embedding);
-    if (!vec || vec.length === 0) {
-      notEmbedded++;
-      continue;
-    }
-    ranked.push({ cand: c, vectorScore: cosine(profileEmbedding, vec) });
-  }
-  if (notEmbedded > 0) {
-    log(`  ${notEmbedded} candidate(s) not yet embedded — skipped (offline backfill covers them)`);
-  }
-  ranked.sort((a, b) => b.vectorScore - a.vectorScore);
-  return ranked.slice(0, topK);
 }
 
 // ---------------------------------------------------------------------------
@@ -685,34 +742,72 @@ export async function runMatch(profile: MatchProfile, opts: MatchOptions): Promi
   const maxYears = opts.maxYearsRequired ?? Math.max(2, profile.yearsExperience + 1);
   const dropSeniorTitles = opts.dropSeniorTitles ?? profile.yearsExperience <= 1;
 
-  log("Stage 1 — rule filter");
-  const raw = await ruleFilter(opts, dropSeniorTitles, profile.location);
-  // JD "N+ years" gate and the active-enrollment gate both need the
-  // description text, so they run in JS here rather than SQL.
-  let yearsDropped = 0;
-  let enrollmentDropped = 0;
-  const candidates = raw.filter((c) => {
-    const req = requiredYears(c.description);
-    if (req !== null && req > maxYears) {
-      yearsDropped++;
-      return false;
-    }
-    // A graduated candidate should never see a role scoped to active students
-    // (a categorically wrong match, not a skill-overlap question) — and
-    // symmetrically, a current student shouldn't be gated OUT of those roles.
-    if (requiresActiveEnrollment(c.description) && !profile.isCurrentStudent) {
-      enrollmentDropped++;
-      return false;
-    }
-    return true;
-  });
-  log(
-    `  ${candidates.length} candidates (role='${opts.roleFocus}', loc='${opts.locationPref}', team='${opts.teamSizeBucket ?? "any"}', maxYears=${maxYears}, seniorTitlesDropped=${dropSeniorTitles}; ${yearsDropped} dropped by JD years gate, ${enrollmentDropped} dropped by active-enrollment gate)`,
-  );
-  if (candidates.length === 0) return [];
+  // The two JD gates below read the full description, and neither is faithfully
+  // expressible in SQL — requiredYears() is a context-window scan over every
+  // "N years" mention, not a regex match. So they still run in JS, which means
+  // the SQL shortlist has to hand back MORE than topK rows for them to cut
+  // into. Measured on the real corpus, the two gates together drop ~37% of a
+  // filtered pool, so 6x topK leaves a wide margin over the ~1.6x that implies.
+  //
+  // The window is the thing that bounds egress now, in place of the old
+  // 1500-row candidate cap: ~150 descriptions instead of up to 1500 rows of
+  // description AND embedding.
+  const window = opts.candidateCap ?? Math.max(150, topK * 6);
 
-  log("Stage 2 — vector rank");
-  const ranked = vectorRank(profile.embedding, candidates, topK, log);
+  const gate = (rows: Ranked[]) => {
+    let yearsDropped = 0;
+    let enrollmentDropped = 0;
+    const kept = rows.filter((r) => {
+      const req = requiredYears(r.cand.description);
+      if (req !== null && req > maxYears) {
+        yearsDropped++;
+        return false;
+      }
+      // A graduated candidate should never see a role scoped to active students
+      // (a categorically wrong match, not a skill-overlap question) — and
+      // symmetrically, a current student shouldn't be gated OUT of those roles.
+      if (requiresActiveEnrollment(r.cand.description) && !profile.isCurrentStudent) {
+        enrollmentDropped++;
+        return false;
+      }
+      return true;
+    });
+    return { kept, yearsDropped, enrollmentDropped };
+  };
+
+  log("Stages 1+2 — rule filter and vector rank (SQL)");
+  let shortlist = await shortlistByVector(
+    opts,
+    dropSeniorTitles,
+    profile.location,
+    profile.embedding,
+    window,
+  );
+  let { kept, yearsDropped, enrollmentDropped } = gate(shortlist);
+
+  // The one case the window can get wrong: a search where the gates happen to
+  // eat almost everything near the top of the ranking. The old path could not
+  // hit this because it gated the whole 1500-row pool before ranking it. Only
+  // worth a second query when the first one actually filled its window — if it
+  // came back short, there is nothing further down to find.
+  if (kept.length < topK && shortlist.length === window) {
+    const widened = window * 4;
+    log(`  only ${kept.length} of ${window} survived the JD gates — widening to ${widened}`);
+    shortlist = await shortlistByVector(
+      opts,
+      dropSeniorTitles,
+      profile.location,
+      profile.embedding,
+      widened,
+    );
+    ({ kept, yearsDropped, enrollmentDropped } = gate(shortlist));
+  }
+
+  log(
+    `  ${shortlist.length} ranked, ${kept.length} survived gates (role='${opts.roleFocus}', loc='${opts.locationPref}', team='${opts.teamSizeBucket ?? "any"}', maxYears=${maxYears}, seniorTitlesDropped=${dropSeniorTitles}; ${yearsDropped} dropped by JD years gate, ${enrollmentDropped} dropped by active-enrollment gate)`,
+  );
+
+  const ranked = kept.slice(0, topK);
   log(
     `  top ${ranked.length} by cosine (best=${ranked[0]?.vectorScore.toFixed(3) ?? "n/a"}, worst=${ranked[ranked.length - 1]?.vectorScore.toFixed(3) ?? "n/a"})`,
   );
