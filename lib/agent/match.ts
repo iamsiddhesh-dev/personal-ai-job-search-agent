@@ -28,6 +28,7 @@ import { db } from "@/lib/db";
 import { jobs, companies } from "@/db/schema";
 import { and, eq, or, ilike, sql, notInArray, type SQL } from "drizzle-orm";
 import { extractStructured } from "@/lib/llm";
+import { CACHE_TTL_MS } from "@/lib/llm/cache";
 import { mapLimit, UA } from "@/lib/sources/http";
 import { z } from "zod";
 
@@ -654,12 +655,6 @@ const JOB_DESC_CHARS = 500;
 // requests/minute.
 const RERANK_CONCURRENCY = 2;
 
-// How long a rerank batch's scoring is trusted before it must be re-asked.
-// Short relative to the resume cache (lib/profile/resume.ts): the job pool
-// underneath a batch shifts as the harvester runs and postings close, so a
-// stale score risks surfacing a job that is no longer live.
-const RERANK_CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6 hours
-
 function chunk<T>(arr: T[], size: number): T[][] {
   const out: T[][] = [];
   for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
@@ -734,8 +729,10 @@ export async function runMatch(profile: MatchProfile, opts: MatchOptions): Promi
       // question — a real possibility since re-running a search minutes apart
       // (or two people/tabs triggering the same search) reuses the exact same
       // Stage-2 shortlist. Short TTL because the underlying job pool changes
-      // as the harvester runs and postings close.
-      cacheTtlMs: RERANK_CACHE_TTL_MS,
+      // as the harvester runs and postings close — defined in lib/llm/cache.ts
+      // because scripts/sweep-llm-cache.ts deletes on the same number and the
+      // two must not drift apart.
+      cacheTtlMs: CACHE_TTL_MS.rerank,
     }),
   );
   log(`  LLM scored ${batches.length} batch(es) of up to ${RERANK_BATCH_SIZE} jobs each`);

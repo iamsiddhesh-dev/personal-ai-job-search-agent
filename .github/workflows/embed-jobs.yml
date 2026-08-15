@@ -8,7 +8,7 @@
 # rather than on a second schedule: this workflow already runs 4x a day against
 # the same database, and it exists partly to keep the Supabase project from
 # auto-pausing after 7 days idle. Today that is the 30-day archived-conversation
-# sweep (Phase C).
+# sweep (Phase C) and the llm_cache prune (Phase D).
 #
 # Trigger: "Run workflow" (workflow_dispatch) to start now, plus a schedule that
 # resumes/maintains automatically. Each run is bounded to ~5h20m so it stays
@@ -52,6 +52,14 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: npm run sweep:conversations:ci
+      # Also before the embed step, and for the same reason. Deletes llm_cache
+      # rows past their task's own TTL — 6h for rerank scores, 90d for resume
+      # extraction — which nothing did until Phase D, so the table grew forever
+      # against a 500 MB database. See scripts/sweep-llm-cache.ts.
+      - name: Sweep stale llm_cache rows (per-task TTL)
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: npm run sweep:llm-cache:ci
       - name: Embed jobs (Cohere, conservatively paced)
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}

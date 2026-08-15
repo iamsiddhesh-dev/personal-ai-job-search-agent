@@ -5,6 +5,7 @@ import { getDocumentProxy, extractText } from "unpdf";
 import mammoth from "mammoth";
 import { z } from "zod";
 import { extractStructured } from "@/lib/llm";
+import { CACHE_TTL_MS } from "@/lib/llm/cache";
 
 export type ResumeFileKind = "pdf" | "docx" | "txt";
 
@@ -113,18 +114,16 @@ ${text}
 """`;
 }
 
-// A given resume's text never changes, so a re-upload of the same file (or a
-// re-parse triggered by some other flow) is the exact same question asked
-// twice — cache it near-indefinitely rather than re-spending a free-tier call
-// on an answer that can't have changed.
-const RESUME_CACHE_TTL_MS = 90 * 24 * 60 * 60 * 1000; // 90 days
-
 export async function extractResumeFacts(text: string): Promise<ResumeFacts> {
   return extractStructured({
     task: "resumeExtraction",
     prompt: buildExtractionPrompt(text),
     schema: resumeFactsSchema,
-    cacheTtlMs: RESUME_CACHE_TTL_MS,
+    // Why 90 days, and why it lives in lib/llm/cache.ts rather than here:
+    // scripts/sweep-llm-cache.ts deletes on the same number, so the reader and
+    // the sweep have to share one constant or the sweep starts destroying rows
+    // this call could still have used.
+    cacheTtlMs: CACHE_TTL_MS.resumeExtraction,
   });
 }
 
@@ -167,9 +166,8 @@ export async function hardenResumeFacts(text: string, facts: ResumeFacts): Promi
       task: "hardening",
       prompt: buildHardeningPrompt(text, facts),
       schema: resumeFactsSchema,
-      // Deterministic in its inputs (same resume text + same prior extraction
-      // -> same check), so it caches on the same terms as extraction itself.
-      cacheTtlMs: RESUME_CACHE_TTL_MS,
+      // Same terms as extraction itself — see CACHE_TTL_MS.
+      cacheTtlMs: CACHE_TTL_MS.hardening,
     });
   } catch {
     return facts;
