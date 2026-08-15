@@ -108,6 +108,11 @@ const GROQ_GPT_OSS_120B = "openai/gpt-oss-120b";
 // Cerebras' available model set varies by account/tier — gpt-oss-120b is what
 // this key has access to (verified via GET /v1/models); llama-3.3-70b 404'd.
 const CEREBRAS_GPT_OSS_120B = "gpt-oss-120b";
+// CHAT ONLY — see chatModelChain(). This model is named in the warning above as
+// unusable for structured output, and that is still true (0/3 on both real
+// schemas). It earns its place solely on tool calling, where it scores 3/3 and
+// brings its own separate 12,000 TPM budget. Never put it in TASK_ROUTES.
+const GROQ_LLAMA_33_70B = "llama-3.3-70b-versatile";
 
 export type LlmTask = "resumeExtraction" | "hardening" | "rerank" | "draftGeneration";
 
@@ -289,17 +294,45 @@ export async function extractStructured<S extends ZodTypeAny>(params: {
 // --- Chat (tool-calling) -----------------------------------------------------
 // The conversational agent needs TOOL CALLING, which is a different capability
 // from the structured output above and narrows the field sharply:
-//   groq gpt-oss-120b — works (2/2 measured). The chat workhorse.
-//   cerebras          — rejects tool definitions outright (400). Excluded.
-//   google gemini     — capable, but 20 requests/DAY per key is nowhere near
-//                       enough for a loop that fires on every message. Kept as
-//                       a last-ditch backstop only.
+//   groq gpt-oss-120b       — works (3/3 measured). The chat workhorse.
+//   groq llama-3.3-70b      — works for TOOLS (3/3), cannot do json_schema at
+//                             all. See below; this is why it is here and not
+//                             in TASK_ROUTES.
+//   cerebras                — rejects tool definitions outright (400). Excluded.
+//   google gemini           — capable, but 20 requests/DAY per key is nowhere
+//                             near enough for a loop that fires on every
+//                             message. Kept as a last-ditch backstop only.
 //
-// Returns a ready-to-try list: every key of the preferred provider first, then
-// the backstop. The caller walks it until one succeeds.
+// GROQ'S FREE-TIER TOKEN LIMITS ARE PER MODEL, NOT PER KEY. Measured against
+// the live key by reading the x-ratelimit headers: spending 1,504 tokens on
+// gpt-oss-120b moved its remaining-tokens from 7,613 to 6,109 while
+// llama-3.3-70b's stayed at 11,963, untouched. Their ceilings are also
+// different — 8,000 TPM for gpt-oss-120b, 12,000 for llama-3.3-70b.
+//
+// That matters more than it looks. This whole application's binding constraint
+// was described as "Groq's 8,000 tokens/minute, about one chat turn per minute
+// for the entire application" — but that is the ceiling of ONE MODEL. Adding a
+// second groq model to this chain adds a genuinely separate 12,000 TPM budget
+// on the same key and the same account: 20,000 TPM total, 2.5x the chat
+// capacity, without a new provider, a new account, or anyone's credit card.
+//
+// It sits BELOW gpt-oss-120b deliberately. llama-3.3-70b is the weaker model
+// and is only reached once gpt-oss-120b is throttled — a position where the
+// alternative was Gemini's 20 requests per DAY, i.e. effectively nothing. A
+// slightly weaker reply beats the rate-limit apology it replaces.
+//
+// It is NOT added to TASK_ROUTES. It scores 0/3 on both real schemas with
+// "This model does not support response format `json_schema`" — the exact
+// failure documented at the top of this file. Tool calling and structured
+// output are separate capabilities and it has only one of them. Verified with
+// `npm run probe:providers -- groq`.
+//
+// Returns a ready-to-try list: every key of the preferred model first, then the
+// next. The caller walks it until one succeeds.
 export function chatModelChain(): LanguageModel[] {
   const steps: ModelStep[] = [
     { provider: "groq", model: GROQ_GPT_OSS_120B },
+    { provider: "groq", model: GROQ_LLAMA_33_70B },
     { provider: "google", model: GEMINI_FLASH },
   ];
   return steps.flatMap(({ provider, model }) =>

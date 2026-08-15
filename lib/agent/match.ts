@@ -555,7 +555,12 @@ interface Ranked {
 // Stage 3 — LLM re-rank
 // ---------------------------------------------------------------------------
 
-const rerankSchema = z.object({
+// Exported for scripts/probe-providers.ts. SCALE-PLAN requires every new
+// provider to be verified against a REAL schema from this codebase rather than
+// a toy one, and this is the harder of the two real ones — a model that passes
+// a flat probe can still score 0/3 here (lib/llm/index.ts:96 documents exactly
+// that happening in production).
+export const rerankSchema = z.object({
   matches: z.array(
     z.object({
       jobIndex: z.number().int().describe("the 1-based index of the job from the list"),
