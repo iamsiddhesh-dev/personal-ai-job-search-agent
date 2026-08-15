@@ -26,7 +26,7 @@ import { z } from "zod";
 import { eq } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { profiles, runs } from "@/db/schema";
-import { chatModelChain, shouldFailOver } from "@/lib/llm";
+import { chatModelChain, shouldFailOver, type CallerKeys } from "@/lib/llm";
 import { getExcludedJobIds, listDueFollowups, markApplied } from "@/lib/applications";
 import { buildMatchProfileFromRow } from "@/lib/agent/build-profile";
 import { runMatch, type LocationPref, type TeamSizeBucket, type RankedMatch } from "@/lib/agent/match";
@@ -510,6 +510,12 @@ export interface ChatTurnInput {
   // deadline instead of running on against a stream nobody is reading — and so
   // the chain stops being walked once there is no time left to walk it.
   signal?: AbortSignal;
+  // This user's OWN provider keys, if they brought any (SCALE-PLAN D.1).
+  // Resolved by the route alongside userId, for the same reason it resolves
+  // that: it is a database read, and everything that touches the database
+  // before the stream opens belongs in the request scope. Plaintext and
+  // server-only — never emit it, never put it in a log line.
+  callerKeys?: CallerKeys;
 }
 
 // A key the provider refuses (401/403) is not a code bug and not a quota — it's
@@ -584,6 +590,7 @@ export async function runChatTurn({
   summary,
   recentMemeIds = [],
   signal,
+  callerKeys,
 }: ChatTurnInput): Promise<ChatTurnResult> {
   const ctx: ToolContext = {
     userId,
@@ -604,7 +611,10 @@ export async function runChatTurn({
 
   const tools = buildTools(ctx, { canSearch, hasSearched });
 
-  const chain = chatModelChain();
+  // On a BYOK user's own key this chain is THEIR whole Groq account rather than
+  // a slice of ours — see keysFor() in lib/llm, which uses a caller's key
+  // exclusively rather than falling back to the shared pool.
+  const chain = chatModelChain(callerKeys);
   if (chain.length === 0) {
     throw new Error("No chat-capable API key configured. Set GROQ_API_KEYS (comma-separated) in .env.");
   }
@@ -638,9 +648,15 @@ export async function runChatTurn({
       // is invisible. `totalUsage` covers every step of the turn, not just the
       // final call, which is the number that actually competes for the budget.
       // Phase D's per-user quotas will read the same field.
+      // `byok` records WHOSE quota this turn spent, which is the one thing the
+      // capacity numbers cannot be read without once users bring their own
+      // keys — a quiet month could be genuine headroom or could be everyone
+      // having moved off the shared pool. A boolean only; never the key, never
+      // the last4.
       console.log(
         `[chat] tokens in=${result.totalUsage.inputTokens ?? "?"} out=${result.totalUsage.outputTokens ?? "?"}`,
         `steps=${result.steps.length} tools=${Object.keys(tools).length}`,
+        `byok=${Boolean(callerKeys?.groq)}`,
       );
 
       const text = result.text.trim();

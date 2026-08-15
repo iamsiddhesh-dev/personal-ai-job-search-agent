@@ -37,6 +37,7 @@ import {
   messages,
   profiles,
   runs,
+  userApiKeys,
   users,
 } from "@/db/schema";
 import { listUserFiles, removeFiles } from "@/lib/storage";
@@ -51,6 +52,8 @@ export interface DeleteAccountResult {
   messagesCascaded: number;
   applications: number;
   profiles: number;
+  /** Their own encrypted provider keys (Phase D BYOK). */
+  apiKeys: number;
   /** Objects removed from the user's `${userId}/` prefix in the resumes bucket. */
   storageObjects: number;
   /**
@@ -173,6 +176,18 @@ export async function deleteAccount(userId: string): Promise<DeleteAccountResult
       await tx.delete(profiles).where(eq(profiles.userId, userId)).returning({ id: profiles.id })
     ).length;
 
+    // Their own provider keys (Phase D). This is the one table here whose rows
+    // are a credential belonging to someone else's account, so "delete my data"
+    // has to mean it — leaving an encrypted Groq key behind for an account that
+    // no longer exists is exactly the thing the feature promises not to do.
+    // Nothing else references these rows, so the position only has to be before
+    // `users`.
+    const deletedApiKeys = (
+      await tx.delete(userApiKeys).where(eq(userApiKeys.userId, userId)).returning({
+        id: userApiKeys.id,
+      })
+    ).length;
+
     // Last. If anything above missed a child row, this is where it fails —
     // loudly, and the whole transaction rolls back with the account intact.
     // That is the entire argument for leaving the FKs at NO ACTION.
@@ -186,6 +201,7 @@ export async function deleteAccount(userId: string): Promise<DeleteAccountResult
       messagesCascaded,
       applications: deletedApplications,
       profiles: deletedProfiles,
+      apiKeys: deletedApiKeys,
     };
   });
 

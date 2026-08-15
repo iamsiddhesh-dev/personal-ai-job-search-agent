@@ -29,6 +29,8 @@ import {
 import { agentErrorMessage } from "@/lib/chat/errors";
 import { summarizeTurns } from "@/lib/chat/summarize";
 import { getOrCreateUser, UUID_RX } from "@/lib/user";
+import { keyringFor, touchKeys } from "@/lib/keys/store";
+import { providersUsingCallerKeys } from "@/lib/llm";
 
 // Vercel Hobby caps a serverless function at 60s, and past that the platform
 // kills the request mid-stream with no chance to say anything. The turn budget
@@ -110,6 +112,13 @@ export async function POST(req: Request) {
   // must STAY above the ReadableStream for the same reason. None of it touches
   // cookies itself, but inserting the user resolution below any of it would.
   const userId = await getOrCreateUser();
+
+  // Their own provider keys, if they brought any (SCALE-PLAN D.1). Read here
+  // rather than inside runChatTurn for the same reason userId is: it is a
+  // database read, and the stream below runs after the headers are gone.
+  // Plaintext, server-only, alive for this request only — it is handed to
+  // lib/llm and to nothing else.
+  const callerKeys = await keyringFor(userId);
 
   const requestedId = typeof body.conversationId === "string" ? body.conversationId : null;
   let conversationId: string;
@@ -276,6 +285,7 @@ export async function POST(req: Request) {
         summary,
         recentMemeIds: memeIds,
         signal: abort.signal,
+        callerKeys,
       });
       // Whichever side loses the race must not reject unhandled: past the
       // deadline the turn keeps running and will reject on the abort, long
@@ -285,6 +295,10 @@ export async function POST(req: Request) {
 
       try {
         const { text } = await Promise.race([turn, deadline]);
+        // Only on a turn that actually completed. Bookkeeping for the "last
+        // used" line in the usage panel; deliberately not awaited on the error
+        // path, where the key may be exactly what failed.
+        void touchKeys(userId, providersUsingCallerKeys(callerKeys));
         // Empty text is handled inside runChatTurn now, by looking at what the
         // turn actually did — the old canned nudge line here is what users were
         // getting instead of their results.

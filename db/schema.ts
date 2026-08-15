@@ -221,6 +221,53 @@ export const messages = pgTable(
   (t) => [index("messages_conversation_ordinal_idx").on(t.conversationId, t.ordinal)],
 );
 
+// A provider API key a user brought themselves (SCALE-PLAN Phase D.1). Their
+// turns then run on their own free-tier quota instead of competing for the
+// shared pool, which is the only real fix for a community-sized audience on
+// somebody's personal Groq account.
+//
+// SIGNED-IN ACCOUNTS ONLY, enforced in app/api/keys/route.ts rather than here —
+// a column cannot express it, since `is_anonymous` lives on `users`. The reason
+// is the still-open question of whether anonymous visitors keep their data at
+// all: pinning someone's provider credential to a row that may become
+// throwaway is the one version of this that is actively harmful, and requiring
+// an account removes it. See SCALE-PLAN's Phase D decisions.
+//
+// user_id is ON DELETE NO ACTION like every other FK here, so lib/account/
+// delete.ts must delete these rows explicitly (it does) and mergeUsers() would
+// fail loudly if a key ever needed re-pointing during an anon->Google merge.
+// Today it cannot: anonymous rows have no keys, by the rule above.
+export const userApiKeys = pgTable(
+  "user_api_keys",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id),
+    // One of lib/llm's ProviderName values. Text rather than an enum to match
+    // the rest of this schema, validated at the route.
+    provider: text("provider").notNull(),
+
+    // AES-256-GCM, base64, bound to (user_id, provider) as additional
+    // authenticated data. NEVER selected into anything that reaches a client —
+    // see lib/keys/crypto.ts and lib/keys/store.ts, which is the only module
+    // permitted to decrypt it.
+    ciphertext: text("ciphertext").notNull(),
+
+    // The last four characters, for "you're using ••••a1b2" in the UI. The only
+    // part of the key that may be displayed or logged.
+    last4: text("last4").notNull(),
+
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    // Refreshed opportunistically, not on every call — enough to tell a live key
+    // from an abandoned one without an UPDATE per LLM request.
+    lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
+  },
+  // One key per provider per user: re-submitting replaces rather than
+  // accumulating, so there is never an ambiguous "which of their keys".
+  (t) => [unique("user_api_keys_user_provider_unique").on(t.userId, t.provider)],
+);
+
 export const drafts = pgTable("drafts", {
   id: uuid("id").primaryKey().defaultRandom(),
   matchId: uuid("match_id").notNull().references(() => matches.id),

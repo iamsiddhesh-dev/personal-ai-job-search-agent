@@ -32,7 +32,7 @@ import { readCache, writeCache } from "./cache";
 //   GROQ_API_KEYS=key1,key2,key3     (or GROQ_API_KEY=key1)
 //   GEMINI_API_KEYS=...              (or GEMINI_API_KEY=...)
 //   CEREBRAS_API_KEYS=...            (or CEREBRAS_API_KEY=...)
-type ProviderName = "google" | "groq" | "cerebras";
+export type ProviderName = "google" | "groq" | "cerebras";
 
 const KEY_ENV: Record<ProviderName, [plural: string, singular: string]> = {
   google: ["GEMINI_API_KEYS", "GEMINI_API_KEY"],
@@ -40,11 +40,46 @@ const KEY_ENV: Record<ProviderName, [plural: string, singular: string]> = {
   cerebras: ["CEREBRAS_API_KEYS", "CEREBRAS_API_KEY"],
 };
 
-function keysFor(provider: ProviderName): string[] {
+/**
+ * A caller's OWN provider keys, if they brought any (SCALE-PLAN Phase D.1).
+ *
+ * Structurally identical to lib/keys/store.ts's UserKeyring, declared here so
+ * lib/llm does not import from lib/keys — the dependency runs the other way,
+ * and lib/llm must stay usable from scripts that have no user at all.
+ */
+export type CallerKeys = Partial<Record<ProviderName, string>>;
+
+// The shared, app-owned pool: a comma-separated env var per provider, falling
+// back to the original single-key name.
+function sharedKeys(provider: ProviderName): string[] {
   const [plural, singular] = KEY_ENV[provider];
   const raw = `${process.env[plural] ?? ""},${process.env[singular] ?? ""}`;
   // De-duplicate so listing the same key in both vars doesn't waste an attempt.
   return [...new Set(raw.split(",").map((k) => k.trim()).filter(Boolean))];
+}
+
+/**
+ * Which keys to try for a provider, in order.
+ *
+ * With no caller keys this is exactly what it always was: the shared env pool.
+ *
+ * When the caller HAS a key for this provider, it is used EXCLUSIVELY — the
+ * shared pool is not appended as a fallback, and that is the whole point rather
+ * than an oversight. SCALE-PLAN: "if the caller has their own key, use it
+ * exclusively so their usage never touches the shared pool." A fallback would
+ * quietly undo it: the heaviest users are exactly the ones who hit their own
+ * limit, so falling through would put the heaviest load back on the shared
+ * quota precisely when it is scarcest, and their turns would still succeed, so
+ * nobody would ever notice it happening.
+ *
+ * A caller with a Groq key but no Cerebras key still uses the shared pool for
+ * Cerebras steps. Per provider, not all-or-nothing — anything else would mean
+ * bringing one key silently disabled the providers they did not bring one for.
+ */
+function keysFor(provider: ProviderName, caller?: CallerKeys): string[] {
+  const own = caller?.[provider]?.trim();
+  if (own) return [own];
+  return sharedKeys(provider);
 }
 
 // Provider clients are keyed by API key so each key gets its own client, built
@@ -250,6 +285,17 @@ export async function extractStructured<S extends ZodTypeAny>(params: {
   prompt: string;
   schema: S;
   cacheTtlMs?: number;
+  // The caller's own provider keys, when they have brought some. Optional
+  // everywhere, so the offline scripts and the harvester keep working with no
+  // user in scope at all.
+  //
+  // Note the cache above is deliberately NOT keyed on this. A cache row is the
+  // answer to a question — "these facts, from this resume text" — and the
+  // answer does not change depending on whose key paid for it. Partitioning by
+  // user would make a BYOK user re-pay for work already done and, worse, would
+  // stop THEIR answers from ever helping anyone else, which is the opposite of
+  // what a shared cache is for.
+  caller?: CallerKeys;
 }): Promise<z.infer<S>> {
   if (params.cacheTtlMs) {
     const cached = await readCache(params.task, params.prompt, params.cacheTtlMs);
@@ -263,7 +309,7 @@ export async function extractStructured<S extends ZodTypeAny>(params: {
   }
 
   const chain = TASK_ROUTES[params.task]
-    .map((step) => ({ step, keys: keysFor(step.provider) }))
+    .map((step) => ({ step, keys: keysFor(step.provider, params.caller) }))
     .filter(({ keys }) => keys.length > 0);
 
   if (chain.length === 0) {
@@ -343,7 +389,11 @@ export async function extractStructured<S extends ZodTypeAny>(params: {
 //
 // Returns a ready-to-try list: every key of the preferred model first, then the
 // next. The caller walks it until one succeeds.
-export function chatModelChain(): LanguageModel[] {
+// `caller` carries the user's own keys when they have brought any. This is the
+// path BYOK matters most for by a wide margin: chat is what the TPM ceiling
+// actually binds, and a user on their own Groq key gets the whole 24k TPM of
+// their own account instead of queueing behind everyone else for ours.
+export function chatModelChain(caller?: CallerKeys): LanguageModel[] {
   const steps: ModelStep[] = [
     { provider: "groq", model: GROQ_GPT_OSS_120B },
     { provider: "groq", model: GROQ_GPT_OSS_20B },
@@ -351,8 +401,14 @@ export function chatModelChain(): LanguageModel[] {
     { provider: "google", model: GEMINI_FLASH },
   ];
   return steps.flatMap(({ provider, model }) =>
-    keysFor(provider).map((key) => clientFor(provider, key)(model)),
+    keysFor(provider, caller).map((key) => clientFor(provider, key)(model)),
   );
+}
+
+/** Which providers in a chain would actually run on the caller's own key. */
+export function providersUsingCallerKeys(caller: CallerKeys | undefined): ProviderName[] {
+  if (!caller) return [];
+  return (Object.keys(caller) as ProviderName[]).filter((p) => caller[p]?.trim());
 }
 
 // --- Embeddings (Cohere) -----------------------------------------------------
