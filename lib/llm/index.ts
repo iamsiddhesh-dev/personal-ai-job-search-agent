@@ -108,11 +108,22 @@ const GROQ_GPT_OSS_120B = "openai/gpt-oss-120b";
 // Cerebras' available model set varies by account/tier — gpt-oss-120b is what
 // this key has access to (verified via GET /v1/models); llama-3.3-70b 404'd.
 const CEREBRAS_GPT_OSS_120B = "gpt-oss-120b";
-// CHAT ONLY — see chatModelChain(). This model is named in the warning above as
-// unusable for structured output, and that is still true (0/3 on both real
-// schemas). It earns its place solely on tool calling, where it scores 3/3 and
-// brings its own separate 12,000 TPM budget. Never put it in TASK_ROUTES.
-const GROQ_LLAMA_33_70B = "llama-3.3-70b-versatile";
+// CHAT ONLY — see chatModelChain(). Both bring their own separate token budget
+// on the same key, and both are here for tool calling, not structured output.
+//
+// Deliberately NOT Meta's llama-3.3-70b-versatile, which also qualifies on
+// every measurement (3/3 tool calling, its own 12,000 TPM — the largest of any
+// of them). Groq is decommissioning its llama models, and a fallback that is
+// scheduled to disappear is worse than no fallback: it fails at the exact
+// moment the primary is already throttled, which is the only time it is ever
+// reached. Prefer the OpenAI- and Alibaba-owned models, which are not part of
+// that wave.
+const GROQ_GPT_OSS_20B = "openai/gpt-oss-20b";
+// The warning above names qwen3.6-27b as unusable for structured output and
+// that is still true — measured 0/3 on the rerank schema and 1/3 on the resume
+// one, failing with "Failed to validate JSON". It is in the CHAT chain only,
+// where it scores 3/3. Never put it in TASK_ROUTES.
+const GROQ_QWEN3_27B = "qwen/qwen3.6-27b";
 
 export type LlmTask = "resumeExtraction" | "hardening" | "rerank" | "draftGeneration";
 
@@ -295,44 +306,48 @@ export async function extractStructured<S extends ZodTypeAny>(params: {
 // The conversational agent needs TOOL CALLING, which is a different capability
 // from the structured output above and narrows the field sharply:
 //   groq gpt-oss-120b       — works (3/3 measured). The chat workhorse.
-//   groq llama-3.3-70b      — works for TOOLS (3/3), cannot do json_schema at
-//                             all. See below; this is why it is here and not
-//                             in TASK_ROUTES.
+//   groq gpt-oss-20b        — 3/3 on tools AND on both real schemas. Same
+//                             family as the workhorse, its own token budget.
+//   groq qwen3.6-27b        — 3/3 on TOOLS, fails json_schema. Chat only.
 //   cerebras                — rejects tool definitions outright (400). Excluded.
 //   google gemini           — capable, but 20 requests/DAY per key is nowhere
 //                             near enough for a loop that fires on every
 //                             message. Kept as a last-ditch backstop only.
 //
-// GROQ'S FREE-TIER TOKEN LIMITS ARE PER MODEL, NOT PER KEY. Measured against
-// the live key by reading the x-ratelimit headers: spending 1,504 tokens on
-// gpt-oss-120b moved its remaining-tokens from 7,613 to 6,109 while
-// llama-3.3-70b's stayed at 11,963, untouched. Their ceilings are also
-// different — 8,000 TPM for gpt-oss-120b, 12,000 for llama-3.3-70b.
+// GROQ'S FREE-TIER TOKEN LIMITS ARE PER MODEL, NOT PER KEY — and not per model
+// FAMILY either. Measured against the live key by reading the x-ratelimit
+// headers: spending 2,977 tokens on gpt-oss-120b took its remaining-tokens down
+// by exactly that, while gpt-oss-20b and qwen3.6-27b both moved by 0. Each of
+// the three carries its own 8,000 TPM.
 //
 // That matters more than it looks. This whole application's binding constraint
 // was described as "Groq's 8,000 tokens/minute, about one chat turn per minute
-// for the entire application" — but that is the ceiling of ONE MODEL. Adding a
-// second groq model to this chain adds a genuinely separate 12,000 TPM budget
-// on the same key and the same account: 20,000 TPM total, 2.5x the chat
+// for the entire application" — but that is the ceiling of ONE MODEL. Three of
+// them on the same key and the same account is 24,000 TPM, 3x the chat
 // capacity, without a new provider, a new account, or anyone's credit card.
 //
-// It sits BELOW gpt-oss-120b deliberately. llama-3.3-70b is the weaker model
-// and is only reached once gpt-oss-120b is throttled — a position where the
-// alternative was Gemini's 20 requests per DAY, i.e. effectively nothing. A
-// slightly weaker reply beats the rate-limit apology it replaces.
+// Ordered by quality, not by budget. Each step is only reached once the one
+// above it is throttled, which is precisely when the alternative used to be
+// Gemini's 20 requests per DAY — i.e. nothing. A slightly weaker reply beats
+// the rate-limit apology it replaces.
 //
-// It is NOT added to TASK_ROUTES. It scores 0/3 on both real schemas with
-// "This model does not support response format `json_schema`" — the exact
-// failure documented at the top of this file. Tool calling and structured
-// output are separate capabilities and it has only one of them. Verified with
-// `npm run probe:providers -- groq`.
+// NEITHER of the two additions goes in TASK_ROUTES, and for different reasons:
+// qwen3.6-27b cannot hold the schemas at all (0/3 on rerank), while gpt-oss-20b
+// passed 3/3 here but is left out on the existing note above — it was measured
+// at 2/3 on the real rerank schema once before, and a model that is
+// occasionally wrong about job matches is worse than one that is slower. Chat
+// is the more forgiving surface: a weaker turn is visible and recoverable,
+// a silently mis-scored shortlist is not.
+//
+// Re-verify any change here with `npm run probe:providers -- groq`.
 //
 // Returns a ready-to-try list: every key of the preferred model first, then the
 // next. The caller walks it until one succeeds.
 export function chatModelChain(): LanguageModel[] {
   const steps: ModelStep[] = [
     { provider: "groq", model: GROQ_GPT_OSS_120B },
-    { provider: "groq", model: GROQ_LLAMA_33_70B },
+    { provider: "groq", model: GROQ_GPT_OSS_20B },
+    { provider: "groq", model: GROQ_QWEN3_27B },
     { provider: "google", model: GEMINI_FLASH },
   ];
   return steps.flatMap(({ provider, model }) =>

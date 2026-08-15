@@ -15,6 +15,7 @@
 //
 // Run:  npm run probe:providers                 (everything with a key set)
 //       npm run probe:providers -- openrouter   (just one)
+//       npm run probe:providers -- groq a,b     (that provider, those models)
 //
 // Adding a candidate model: put it in CANDIDATES below. Nothing here writes to
 // the database or to lib/llm — a pass is a licence to edit TASK_ROUTES or
@@ -84,8 +85,8 @@ const CANDIDATES: Candidate[] = [
   // already the workhorse and speaks the OpenAI-compatible API too, so it is
   // the one provider where the right answers are known in advance:
   //   openai/gpt-oss-120b        — in production for all four tasks. Must PASS.
-  //   llama-3.3-70b-versatile    — documented at lib/llm/index.ts:99 as hard-
-  //                                failing json_schema. Must FAIL structured
+  //   qwen/qwen3.6-27b           — documented in lib/llm/index.ts as unable to
+  //                                hold json_schema. Must FAIL structured
   //                                output while still passing tool calling.
   // If those two ever come out the same way, this harness has stopped
   // measuring what it claims to and nothing it says about a new provider can
@@ -94,7 +95,7 @@ const CANDIDATES: Candidate[] = [
     provider: "groq",
     envVar: "GROQ_API_KEY",
     baseURL: "https://api.groq.com/openai/v1",
-    models: ["openai/gpt-oss-120b", "llama-3.3-70b-versatile"],
+    models: ["openai/gpt-oss-120b", "qwen/qwen3.6-27b"],
     console: "console.groq.com — already configured; calibration only",
     // The adapter lib/llm actually uses for groq, so the calibration reproduces
     // production rather than a compat-layer artifact.
@@ -299,6 +300,7 @@ const mark = (o: Outcome) =>
 
 async function main() {
   const only = process.argv[2];
+  const modelOverride = process.argv[3]?.split(",").map((s) => s.trim()).filter(Boolean);
   const wanted = only
     ? CANDIDATES.filter((c) => c.provider === only)
     : CANDIDATES.filter((c) => !CALIBRATION_ONLY.has(c.provider));
@@ -328,7 +330,10 @@ async function main() {
         supportsStructuredOutputs: true,
       });
 
-    for (const modelId of c.models) {
+    // Ad-hoc model list, so evaluating a replacement model does not mean
+    // editing this file first.
+    const models = modelOverride ?? c.models;
+    for (const modelId of models) {
       console.log(`\n=== ${c.provider} / ${modelId} ===`);
       const model = client(modelId);
 
