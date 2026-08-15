@@ -19,7 +19,7 @@
 //     messages with no error anywhere; a user just finds the agent has
 //     forgotten them.
 
-import { and, asc, desc, eq, inArray, isNull, lt } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNotNull, isNull, lt } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { companies, conversations, jobs, matches, messages, runs } from "@/db/schema";
 import type { RankedMatch } from "@/lib/agent/match";
@@ -73,7 +73,7 @@ function toTitle(text: string): string {
   return clean.length > TITLE_MAX ? `${clean.slice(0, TITLE_MAX - 1)}…` : clean;
 }
 
-/** This user's live threads, newest first. Archived ones are Phase C's. */
+/** This user's live threads, newest first. */
 export async function listConversations(userId: string): Promise<ConversationSummary[]> {
   return db
     .select({
@@ -85,6 +85,65 @@ export async function listConversations(userId: string): Promise<ConversationSum
     .where(and(eq(conversations.userId, userId), isNull(conversations.archivedAt)))
     .orderBy(desc(conversations.updatedAt))
     .limit(50);
+}
+
+/**
+ * This user's ARCHIVED threads, newest first, with when each will be swept.
+ *
+ * Nothing could read these until Phase D. "New chat" has been archiving threads
+ * since Phase C and no surface listed them, which made a reversible action feel
+ * permanent — the reason NewChatDialog exists at all. Listing them is what
+ * retires that dialog's second paragraph.
+ */
+export async function listArchivedConversations(
+  userId: string,
+): Promise<(ConversationSummary & { archivedAt: Date })[]> {
+  const rows = await db
+    .select({
+      id: conversations.id,
+      title: conversations.title,
+      updatedAt: conversations.updatedAt,
+      archivedAt: conversations.archivedAt,
+    })
+    .from(conversations)
+    .where(and(eq(conversations.userId, userId), isNotNull(conversations.archivedAt)))
+    .orderBy(desc(conversations.archivedAt))
+    .limit(50);
+
+  // archivedAt is nullable in the schema but never null here, given the WHERE.
+  return rows.map((r) => ({ ...r, archivedAt: r.archivedAt! }));
+}
+
+/**
+ * Bring an archived thread back into the listing, on the user's explicit
+ * request from the usage panel.
+ *
+ * The mirror of archiveConversation, and scoped by userId inside the UPDATE for
+ * the same reason: a stranger's id must not be reopenable by racing a separate
+ * ownership check. Distinct from reviveConversation() below, which takes no
+ * userId because /api/chat has already established ownership and is reacting to
+ * a turn arriving rather than to someone asking.
+ *
+ * Reopening also resets the 30-day sweep clock, because archived_at is both
+ * "retired" and "retired at" — a thread the user has just pulled back is not
+ * one the sweep should still be counting down.
+ */
+export async function unarchiveConversation(
+  userId: string,
+  conversationId: string,
+): Promise<boolean> {
+  const rows = await db
+    .update(conversations)
+    .set({ archivedAt: null })
+    .where(
+      and(
+        eq(conversations.id, conversationId),
+        eq(conversations.userId, userId),
+        isNotNull(conversations.archivedAt),
+      ),
+    )
+    .returning({ id: conversations.id });
+  return rows.length > 0;
 }
 
 export async function createConversation(userId: string, title?: string): Promise<string> {

@@ -17,11 +17,12 @@
 // to them too.
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { LogIn, LogOut, MessageSquarePlus, Trash2, User } from "lucide-react";
+import { Gauge, LogIn, LogOut, MessageSquarePlus, Trash2, User } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
 import { beginGoogle, hasPendingRetry, isSigningIn, setSigningIn } from "@/lib/account/googleSignIn";
 import { DeleteAccountDialog } from "./DeleteAccountDialog";
 import { NewChatDialog } from "./NewChatDialog";
+import { UsagePanel } from "./UsagePanel";
 
 type Account = {
   authConfigured: boolean;
@@ -41,9 +42,15 @@ interface AccountMenuProps {
    * rather than its child.
    */
   onNewChat?: () => Promise<void>;
+  /**
+   * Opens a named (reopened) thread. Same ownership reason as onNewChat — the
+   * usage panel lists archived threads, but the panel that displays one is this
+   * component's sibling.
+   */
+  onOpenThread?: (id: string) => void;
 }
 
-export function AccountMenu({ onNewChat }: AccountMenuProps) {
+export function AccountMenu({ onNewChat, onOpenThread }: AccountMenuProps) {
   const [account, setAccount] = useState<Account | null>(null);
   const [open, setOpen] = useState(false);
   // Seeded from sessionStorage, not false: if this render is the page load
@@ -53,6 +60,7 @@ export function AccountMenu({ onNewChat }: AccountMenuProps) {
   const [busy, setBusy] = useState(() => isSigningIn());
   const [confirmingNewChat, setConfirmingNewChat] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [showingUsage, setShowingUsage] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -202,6 +210,26 @@ export function AccountMenu({ onNewChat }: AccountMenuProps) {
             </p>
           )}
 
+          {/* Above "New chat" on purpose: it is where the past-chats list
+              lives, so someone who has just archived a thread by accident finds
+              the way back before they reach the button that did it. Reachable
+              without an account for the same reason New chat and Delete are —
+              an anonymous visitor has a real quota and real threads. */}
+          {onOpenThread && (
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => {
+                setOpen(false);
+                setShowingUsage(true);
+              }}
+              disabled={busy}
+              className="flex w-full items-center gap-2 px-3 py-2 font-body text-sm text-bone/80 hover:bg-bone/10 disabled:opacity-50"
+            >
+              <Gauge size={14} />
+              Your usage &amp; past chats
+            </button>
+          )}
           {onNewChat && (
             <button
               type="button"
@@ -252,6 +280,9 @@ export function AccountMenu({ onNewChat }: AccountMenuProps) {
         <NewChatDialog onConfirm={onNewChat} onClose={() => setConfirmingNewChat(false)} />
       )}
       {confirmingDelete && <DeleteAccountDialog onClose={() => setConfirmingDelete(false)} />}
+      {showingUsage && onOpenThread && (
+        <UsagePanel onOpenThread={onOpenThread} onClose={() => setShowingUsage(false)} />
+      )}
     </div>
   );
 }

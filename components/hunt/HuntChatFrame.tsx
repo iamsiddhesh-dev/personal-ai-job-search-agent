@@ -46,6 +46,16 @@ export default function HuntChatFrame({ onBack, reducedMotion }: HuntChatFramePr
     setOpenId(id);
   }, []);
 
+  // Open a specific existing thread — the usage panel's past-chats list. The
+  // route has already un-archived it by the time this runs; all that is left is
+  // to point the panel at it, which is the same remount-by-key that "new chat"
+  // does. Same ordering rule: set the ref first so the panel's own mount report
+  // cannot race the switch.
+  const openThread = useCallback((id: string) => {
+    activeIdRef.current = id;
+    setOpenId(id);
+  }, []);
+
   return (
     // The root must never be translated: it is full-width, so animating `x`
     // on it pushes the document wider than the viewport and the page lands
@@ -103,7 +113,7 @@ export default function HuntChatFrame({ onBack, reducedMotion }: HuntChatFramePr
             {/* The slot the border toggle vacated. AccountMenu keeps the same
                 8x8 footprint even while loading, so the title stays optically
                 centred against the back button. */}
-            <AccountMenu onNewChat={startNewChat} />
+            <AccountMenu onNewChat={startNewChat} onOpenThread={openThread} />
           </div>
 
           <div className="flex min-h-0 flex-1 flex-col font-body">

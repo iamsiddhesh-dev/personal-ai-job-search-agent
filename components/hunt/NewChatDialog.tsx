@@ -3,10 +3,19 @@
 // Confirmation for "New chat".
 //
 // The thread is only ARCHIVED, not destroyed — it stays in Postgres for 30 days
-// before the sweep takes it (scripts/sweep-conversations.ts). But nothing in the
-// UI can reopen an archived thread, so from the user's side one click makes
-// their conversation disappear with no undo. That is worse than being honestly
-// permanent or honestly recoverable, so it gets a stop.
+// before the sweep takes it (scripts/sweep-conversations.ts), and since Phase D
+// the usage panel lists archived threads and can reopen one.
+//
+// That is why this dialog is now much lighter than it was. It used to have to
+// warn that the conversation could not be opened again from anywhere, because
+// that was true: archiving existed from Phase C but nothing listed the archive,
+// so a reversible action was indistinguishable from a destructive one. With
+// "Your usage & past chats" in the same menu, the honest version is simply
+// where the thread goes.
+//
+// The stop stays. Not because the action is dangerous any more, but because
+// "New chat" sits one click above "Delete my data" and a mis-click between the
+// two should still cost a confirmation rather than a thread.
 //
 // Deliberately NOT the typed-phrase gate DeleteAccountDialog uses. That one
 // guards something genuinely irreversible; reusing it here would teach people
@@ -18,10 +27,9 @@
 // reset is chat only: the agent must still know who they are afterwards and
 // must not re-ask for the resume.
 //
-// It also does not mention the 30 days. That window is real, but there is no
-// way for a user to act on it — telling them their chat is "kept" while giving
-// them no way to open it is a promise the UI cannot keep. When archived threads
-// become reachable (SCALE-PLAN Phase C, still open), this copy changes with it.
+// It now DOES mention where the thread goes, which it deliberately did not
+// before: naming a 30-day window the user could not act on would have been a
+// promise the UI could not keep. It can keep it now.
 
 import { useEffect, useRef, useState } from "react";
 
@@ -94,8 +102,8 @@ export function NewChatDialog({
           you are and won&apos;t ask for your resume again.
         </p>
         <p className="mt-2 text-sm text-bone/50">
-          This conversation drops off the screen, and you won&apos;t be able to open it again from
-          here.
+          This conversation moves to <span className="text-bone/70">Your usage &amp; past chats</span>,
+          where you can reopen it for the next 30 days.
         </p>
 
         {error && <p className="mt-2 text-sm text-red-400">{error}</p>}
