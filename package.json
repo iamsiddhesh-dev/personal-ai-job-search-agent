@@ -41,6 +41,7 @@
     "@ai-sdk/openai-compatible": "^3.0.14",
     "@supabase/ssr": "^0.12.4",
     "@supabase/supabase-js": "^2.110.8",
+    "@vercel/analytics": "^2.0.1",
     "ai": "^7.0.35",
     "drizzle-orm": "^0.45.2",
     "framer-motion": "^12.42.2",

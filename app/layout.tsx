@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
+import { Analytics } from "@vercel/analytics/next";
 import { cabinetGrotesk, ranade, bespokeSlab } from "@/lib/fonts";
 import GoogleAuthRetry from "@/components/hunt/GoogleAuthRetry";
 import "./globals.css";
@@ -35,6 +36,10 @@ export default function RootLayout({
             AccountMenu. */}
         <GoogleAuthRetry />
         {children}
+        {/* Page-view tracking only — collects no PII, sends nothing about a
+            user's chat, resume or search. Vercel's own middleware endpoint
+            handles the beacon; no env var or project id needed here. */}
+        <Analytics />
       </body>
     </html>
   );
