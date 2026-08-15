@@ -255,8 +255,16 @@ const COUNTRY_LOCATION_PATTERNS: Record<string, string> = {
 const GLOBAL_REMOTE_RX = "world ?wide|anywhere|globally|global remote|remote - global";
 const REMOTE_SQL_RX = `remote|${GLOBAL_REMOTE_RX}`;
 
-// Postgres ~* takes a regex, so anything interpolated from user text must have
-// its metacharacters neutered or a stray "(" becomes a query error.
+// Postgres ~* takes a regex, so anything derived from user text must have its
+// metacharacters neutered or a stray "(" becomes a query error.
+//
+// This is a REGEX escape and nothing more. It does not make a string safe to
+// concatenate into SQL — it does not touch the single quote. Every caller must
+// pass the result to Postgres as a bound parameter, never through sql.raw().
+// See locationCondition below, where doing exactly that was a live SQL
+// injection: `escapeRx` was applied to the candidate's own free-text location
+// and the result was pasted inside a quoted SQL literal, so a resume whose
+// location contained an apostrophe closed the literal early.
 function escapeRx(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -285,7 +293,12 @@ function locationCondition(pref: LocationPref, profileLocation: string | null): 
     case "anywhere":
       return undefined;
     case "remote":
-      return sql`(${jobs.isRemote} = true OR ${jobs.location} ~* '${sql.raw(REMOTE_SQL_RX)}')`;
+      // Bound parameter, not sql.raw. REMOTE_SQL_RX is a module constant and so
+      // was never itself dangerous, but the raw form is the pattern that made
+      // the injection below possible — one interpolation that looks identical
+      // to its neighbours and happens to carry user text. `~*` takes the
+      // pattern as an ordinary text operand, so binding costs nothing.
+      return sql`(${jobs.isRemote} = true OR ${jobs.location} ~* ${REMOTE_SQL_RX})`;
     case "local": {
       // Keep roles in the candidate's own country plus any remote role
       // (feasibility of a country-locked remote is left to the LLM to flag),
@@ -298,7 +311,15 @@ function locationCondition(pref: LocationPref, profileLocation: string | null): 
         // feasibility instead.
         return undefined;
       }
-      return sql`(${jobs.location} ~* '${sql.raw(localRx)}' OR ${jobs.isRemote} = true OR ${jobs.location} ~* '${sql.raw(REMOTE_SQL_RX)}')`;
+      // `localRx` is the one interpolation here carrying USER TEXT: it falls
+      // back to the candidate's own free-text location, which is LLM-extracted
+      // from the resume they uploaded. Under the previous `'${sql.raw(...)}'`
+      // form that was a SQL injection — escapeRx neutralises regex
+      // metacharacters but not the apostrophe, so a location of
+      // `Pune' OR 1=1 --` closed the literal and appended to the WHERE clause
+      // of a query against a database that also holds every user's resume text
+      // and, since Phase D, their encrypted provider keys. Bound now.
+      return sql`(${jobs.location} ~* ${localRx} OR ${jobs.isRemote} = true OR ${jobs.location} ~* ${REMOTE_SQL_RX})`;
     }
   }
 }
@@ -387,7 +408,10 @@ function matchConditions(
     teamSizeCondition(opts.teamSizeBucket),
   ];
   if (dropSeniorTitles) {
-    conds.push(sql`${jobs.title} !~* '${sql.raw(SENIOR_TITLE_RX)}'`);
+    // Bound, like the two above. A constant today; the point is that no
+    // interpolation in this file pastes a pattern into a quoted literal, so
+    // there is no safe-looking template left for the next one to copy.
+    conds.push(sql`${jobs.title} !~* ${SENIOR_TITLE_RX}`);
   }
   if (opts.excludeJobIds && opts.excludeJobIds.length > 0) {
     conds.push(notInArray(jobs.id, opts.excludeJobIds));

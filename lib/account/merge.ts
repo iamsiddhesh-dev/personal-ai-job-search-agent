@@ -11,9 +11,9 @@
 // half-applied merge is worse than no merge: rows pointing at a user row that
 // no longer exists, or two profiles on one account.
 
-import { and, eq, ne } from "drizzle-orm";
+import { and, eq, ne, sql } from "drizzle-orm";
 import { db } from "@/lib/db";
-import { applications, conversations, profiles, runs, users } from "@/db/schema";
+import { applications, conversations, profiles, runs, usageCounters, users } from "@/db/schema";
 
 export type MergeResult =
   | { merged: false; reason: "same-user" | "source-missing" | "source-not-anonymous" | "target-missing" }
@@ -128,6 +128,47 @@ export async function mergeUsers(fromAnonUserId: string, toUserId: string): Prom
       .where(eq(conversations.userId, fromAnonUserId))
       .returning({ id: conversations.id });
 
+    // Quota counters (Phase D). Anonymous visitors DO accumulate these — every
+    // chat turn calls consume() and the anonymous limit is 10, not 0 — so
+    // usage_counters.user_id is a live NO ACTION reference to the row about to
+    // be deleted, exactly like conversations above. Forgetting it makes the
+    // delete below fail with a foreign-key violation for any anonymous user who
+    // sent a single message and then signed in through this path, and
+    // app/auth/callback/route.ts deliberately swallows a failed merge so the
+    // sign-in still works — so the symptom would be silent: their profile,
+    // resume and conversations left stranded on an abandoned row.
+    //
+    // SUMMED into the target rather than moved or dropped. Moving them cannot
+    // work — (user_id, day, action) is the primary key, so a target that acted
+    // today already owns that row. Dropping them would make signing in a way to
+    // wipe today's usage and start the larger signed-in allowance from zero,
+    // which turns the upgrade prompt into a quota reset button. Adding them
+    // keeps the day's total honest across the merge.
+    const sourceCounters = await tx
+      .select({
+        day: usageCounters.day,
+        action: usageCounters.action,
+        count: usageCounters.count,
+      })
+      .from(usageCounters)
+      .where(eq(usageCounters.userId, fromAnonUserId));
+
+    for (const row of sourceCounters) {
+      await tx
+        .insert(usageCounters)
+        .values({ userId: toUserId, day: row.day, action: row.action, count: row.count })
+        .onConflictDoUpdate({
+          target: [usageCounters.userId, usageCounters.day, usageCounters.action],
+          set: { count: sql`${usageCounters.count} + ${row.count}` },
+        });
+    }
+    await tx.delete(usageCounters).where(eq(usageCounters.userId, fromAnonUserId));
+
+    // user_api_keys is deliberately NOT handled here, and that is not an
+    // oversight. app/api/keys/route.ts refuses anonymous accounts outright, so
+    // an anonymous row can never own a key and there is nothing to move. If
+    // that rule is ever relaxed, this delete is what will catch it — loudly,
+    // which is the entire reason these constraints stay NO ACTION.
     await tx.delete(users).where(and(eq(users.id, fromAnonUserId), ne(users.id, toUserId)));
 
     // The Supabase auth user behind the anonymous session is deliberately left
