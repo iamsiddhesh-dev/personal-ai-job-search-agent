@@ -16,7 +16,7 @@
 // rather than spending a separate task's budget.
 
 import { generateText, type ModelMessage } from "ai";
-import { chatModelChain } from "@/lib/llm";
+import { chatModelChain, isKeyRejected } from "@/lib/llm";
 
 const SUMMARIZE_PROMPT = `Condense this conversation between a job-hunting agent and a candidate into a short factual note, under 150 words. Anything you drop, the agent will ask for a second time — which reads as not listening. Capture, in this order of priority:
 1. The candidate's NAME, and whether a resume/github/linkedin/portfolio has been shared.
@@ -54,8 +54,14 @@ export async function summarizeTurns(
     : `${SUMMARIZE_PROMPT}\n\nCONVERSATION:\n${transcript}`;
 
   const chain = chatModelChain();
+  // Same dead-key skip as runChatTurn, and needed for the same reason: one key
+  // now appears once per model in the chain, so a rejected key would otherwise
+  // cost this a wasted round trip per model — inside the same 45s turn budget
+  // the agent call is already competing for.
+  const deadKeys = new Set<string>();
   let lastErr: unknown;
-  for (const model of chain) {
+  for (const { model, keyId } of chain) {
+    if (deadKeys.has(keyId)) continue;
     try {
       const { text } = await generateText({ model, prompt });
       const summary = text.trim();
@@ -66,6 +72,7 @@ export async function summarizeTurns(
       lastErr = new Error("Summarizer returned no text.");
     } catch (err) {
       lastErr = err;
+      if (isKeyRejected(err)) deadKeys.add(keyId);
     }
   }
   throw lastErr;

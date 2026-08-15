@@ -26,7 +26,7 @@ import { z } from "zod";
 import { eq } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { profiles, runs } from "@/db/schema";
-import { chatModelChain, shouldFailOver, type CallerKeys } from "@/lib/llm";
+import { chatModelChain, isKeyRejected, shouldFailOver, type CallerKeys } from "@/lib/llm";
 import { consume, quotaMessage } from "@/lib/usage/quota";
 import { getExcludedJobIds, listDueFollowups, markApplied } from "@/lib/applications";
 import { buildMatchProfileFromRow } from "@/lib/agent/build-profile";
@@ -569,16 +569,6 @@ export interface ChatTurnInput {
   callerKeys?: CallerKeys;
 }
 
-// A key the provider refuses (401/403) is not a code bug and not a quota — it's
-// one dead entry in a pool. The chain is built key-by-key (see chatModelChain),
-// so the next entry may well be fine and the turn should go on. It is still a
-// misconfiguration somebody has to fix, hence the loud log.
-function isKeyRejected(err: unknown): boolean {
-  const msg = err instanceof Error ? err.message : String(err);
-  const status = (err as { statusCode?: number })?.statusCode;
-  return status === 401 || status === 403 || /invalid api key|unauthorized|forbidden/i.test(msg);
-}
-
 // The turn ran, called tools, and produced no words — the bug where a user
 // waited minutes and got a canned "…what else can i dig into?" back. The model
 // already has every tool result in front of it, so ask once more with NO tools
@@ -675,11 +665,25 @@ export async function runChatTurn({
 
   const system = buildSystemPrompt(tools, { canSearch, hasSearched }, summary);
 
+  // Keys the provider has refused during THIS turn. The same key appears once
+  // per model in the chain (see chatModelChain), so without this a single dead
+  // key costs three 401 round trips per turn instead of one — which is what
+  // pushed live search turns past the 45s deadline the day the chain grew from
+  // one groq model to three.
+  //
+  // Per-turn, deliberately, not module-level: a 401 can also be a transient
+  // provider blip, and a process-wide blocklist would keep a recovered key
+  // sidelined for the life of a warm isolate with nothing to clear it.
+  const deadKeys = new Set<string>();
+
   let lastErr: unknown;
-  for (const model of chain) {
+  for (const { model, keyId } of chain) {
     // Out of time: another hop can only make the wait longer. Let the route's
     // deadline handling say so in the agent's voice.
     if (signal?.aborted) break;
+    // Already refused this key on an earlier model this turn — skip without
+    // paying for the round trip that would refuse it again.
+    if (deadKeys.has(keyId)) continue;
     try {
       const result = await generateText({
         model,
@@ -739,7 +743,14 @@ export async function runChatTurn({
     } catch (err) {
       lastErr = err;
       if (isKeyRejected(err)) {
-        console.error("[chat] provider rejected an API key — skipping it:", err);
+        // Remembered by fingerprint so every OTHER model sharing this key is
+        // skipped too. Logged once per key per turn rather than once per model,
+        // and by fingerprint — never the key itself.
+        deadKeys.add(keyId);
+        console.error(
+          `[chat] provider rejected key ${keyId} — skipping every model on it for this turn. ` +
+            "This is a configuration problem: check the provider key env vars.",
+        );
         continue;
       }
       // Only quota/outage-shaped failures deserve the next model. A bug in our

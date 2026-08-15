@@ -15,6 +15,7 @@
 // EMBEDDINGS -> Cohere (embed-v4.0, 1024-dim), unrelated to the task routing
 // above (Groq/Cerebras have no embedding endpoint).
 
+import { createHash } from "node:crypto";
 import { createGoogleGenerativeAI } from "@ai-sdk/google";
 import { createGroq } from "@ai-sdk/groq";
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
@@ -221,6 +222,20 @@ export function looksLikeQuotaOrServerError(err: unknown): boolean {
   );
 }
 
+// A key the provider refuses (401/403) is not a code bug and not a quota — it's
+// one dead entry in a pool, and the next entry may well be fine. It is still a
+// misconfiguration somebody has to fix, so callers log it loudly.
+//
+// Lives here rather than in lib/chat because it is a statement about a
+// provider's response, exactly like shouldFailOver above, and because BOTH
+// chat-chain walkers need it: runChatTurn and summarizeTurns each walk
+// chatModelChain(), where one bad key now appears once per model.
+export function isKeyRejected(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  const status = (err as { statusCode?: number })?.statusCode;
+  return status === 401 || status === 403 || /invalid api key|unauthorized|forbidden/i.test(msg);
+}
+
 // Reasons to move to the next step in a chain: a quota/server outage, or the
 // model failing to produce schema-valid output. The latter can mean a genuine
 // prompt bug, but it also happens when a model doesn't truly enforce
@@ -393,7 +408,31 @@ export async function extractStructured<S extends ZodTypeAny>(params: {
 // path BYOK matters most for by a wide margin: chat is what the TPM ceiling
 // actually binds, and a user on their own Groq key gets the whole 24k TPM of
 // their own account instead of queueing behind everyone else for ours.
-export function chatModelChain(caller?: CallerKeys): LanguageModel[] {
+//
+// Each entry carries a `keyId`, and that is load-bearing rather than
+// diagnostic. THE SAME KEY NOW APPEARS ONCE PER MODEL in this chain, so a key
+// the provider rejects outright gets retried three times in a single turn, at a
+// full network round trip each. That is not hypothetical: within an hour of
+// this chain going from one groq model to three, production had an invalid key
+// at the front of the pool and every turn paid a 401 on gpt-oss-120b, then
+// gpt-oss-20b, then qwen3.6-27b before reaching a working key — enough dead
+// time to push search turns past the 45s deadline, which users saw as "that one
+// took way too long so i bailed on it". runChatTurn uses keyId to skip a dead
+// key's remaining entries without spending the round trip.
+export interface ChatModelChoice {
+  model: LanguageModel;
+  provider: ProviderName;
+  /** Stable per-key fingerprint. Safe to log — a hash, never the key. */
+  keyId: string;
+}
+
+// Short, stable, and NOT the key. Only used to tell entries in one chain apart
+// and to name a dead key in a log line without printing a credential.
+function keyFingerprint(provider: ProviderName, key: string): string {
+  return `${provider}:${createHash("sha256").update(key).digest("hex").slice(0, 8)}`;
+}
+
+export function chatModelChain(caller?: CallerKeys): ChatModelChoice[] {
   const steps: ModelStep[] = [
     { provider: "groq", model: GROQ_GPT_OSS_120B },
     { provider: "groq", model: GROQ_GPT_OSS_20B },
@@ -401,7 +440,11 @@ export function chatModelChain(caller?: CallerKeys): LanguageModel[] {
     { provider: "google", model: GEMINI_FLASH },
   ];
   return steps.flatMap(({ provider, model }) =>
-    keysFor(provider, caller).map((key) => clientFor(provider, key)(model)),
+    keysFor(provider, caller).map((key) => ({
+      model: clientFor(provider, key)(model),
+      provider,
+      keyId: keyFingerprint(provider, key),
+    })),
   );
 }
 
