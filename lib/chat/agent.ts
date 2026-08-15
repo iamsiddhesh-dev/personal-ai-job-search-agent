@@ -27,6 +27,7 @@ import { eq } from "drizzle-orm";
 import { db } from "@/lib/db";
 import { profiles, runs } from "@/db/schema";
 import { chatModelChain, shouldFailOver, type CallerKeys } from "@/lib/llm";
+import { consume, quotaMessage } from "@/lib/usage/quota";
 import { getExcludedJobIds, listDueFollowups, markApplied } from "@/lib/applications";
 import { buildMatchProfileFromRow } from "@/lib/agent/build-profile";
 import { runMatch, type LocationPref, type TeamSizeBucket, type RankedMatch } from "@/lib/agent/match";
@@ -172,6 +173,13 @@ export interface ToolContext {
   sentMemeThisTurn: boolean;
   // Catalog ids already sent, so the same image doesn't repeat.
   recentMemeIds: string[];
+  // Whether this account is still anonymous, for the search quota. Read once by
+  // the route rather than re-queried inside a tool that may run several times.
+  isAnonymous: boolean;
+  // Their own provider keys. Threaded into runMatch so a BYOK user's job
+  // re-rank runs on their key too, not just their chat — the search quota
+  // exemption in lib/usage/quota.ts is only honest if that is actually true.
+  callerKeys?: CallerKeys;
 }
 
 async function loadProfileRow(userId: string) {
@@ -308,6 +316,29 @@ export function buildTools(ctx: ToolContext, gate: ToolGate): ToolSet {
           return { ok: false as const, reason: (err as Error).message };
         }
 
+        // The search quota is counted HERE rather than in the route, because
+        // only the model knows whether a turn is going to search. Counted after
+        // the profile checks above so a search that was never going to run
+        // does not cost them one.
+        //
+        // Returned as a tool result, not thrown: the model reads `reason` and
+        // says it in its own words, which keeps the refusal inside the
+        // conversation instead of replacing the whole turn with an error
+        // bubble. quotaMessage() gives it the honest line to work from.
+        const searchQuota = await consume(ctx.userId, "search", {
+          isAnonymous: ctx.isAnonymous,
+          caller: ctx.callerKeys,
+        });
+        if (!searchQuota.allowed) {
+          console.log(
+            `[chat] quota refused ${ctx.userId}: ${searchQuota.used}/${searchQuota.limit} searches today`,
+          );
+          return {
+            ok: false as const,
+            reason: quotaMessage("search", ctx.isAnonymous),
+          };
+        }
+
         ctx.emit({ type: "status", message: "searching the job database…" });
         const excludeJobIds = await getExcludedJobIds(ctx.userId);
         const results = await runMatch(matchProfile, {
@@ -316,6 +347,9 @@ export function buildTools(ctx: ToolContext, gate: ToolGate): ToolSet {
           teamSizeBucket: teamSizeBucket as TeamSizeBucket,
           excludeJobIds,
           log: (m) => ctx.emit({ type: "status", message: m }),
+          // So the LLM re-rank — the expensive part of a search — runs on the
+          // user's own key when they have one.
+          caller: ctx.callerKeys,
         });
 
         // Persist so each card carries a matches.id that outreach drafts can
@@ -510,6 +544,9 @@ export interface ChatTurnInput {
   // deadline instead of running on against a stream nobody is reading — and so
   // the chain stops being walked once there is no time left to walk it.
   signal?: AbortSignal;
+  // Whether the account is still anonymous, which decides the search quota's
+  // ceiling. Resolved by the route with everything else it reads up front.
+  isAnonymous: boolean;
   // This user's OWN provider keys, if they brought any (SCALE-PLAN D.1).
   // Resolved by the route alongside userId, for the same reason it resolves
   // that: it is a database read, and everything that touches the database
@@ -590,6 +627,7 @@ export async function runChatTurn({
   summary,
   recentMemeIds = [],
   signal,
+  isAnonymous,
   callerKeys,
 }: ChatTurnInput): Promise<ChatTurnResult> {
   const ctx: ToolContext = {
@@ -598,6 +636,8 @@ export async function runChatTurn({
     collectedJobs: [],
     sentMemeThisTurn: false,
     recentMemeIds,
+    isAnonymous,
+    callerKeys,
   };
 
   // Two small indexed reads, in parallel, to decide what this turn is allowed

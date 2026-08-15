@@ -11,6 +11,8 @@ import {
   vector,
   real,
   unique,
+  date,
+  primaryKey,
 } from "drizzle-orm/pg-core";
 
 export const users = pgTable("users", {
@@ -266,6 +268,34 @@ export const userApiKeys = pgTable(
   // One key per provider per user: re-submitting replaces rather than
   // accumulating, so there is never an ambiguous "which of their keys".
   (t) => [unique("user_api_keys_user_provider_unique").on(t.userId, t.provider)],
+);
+
+// Per-user, per-day action counts (SCALE-PLAN Phase D.2). What stops one
+// enthusiastic visitor draining the shared free-tier pool for everyone else.
+//
+// IN POSTGRES, NOT IN MEMORY, and that is not a style preference: Vercel gives
+// every request a fresh serverless isolate, so a module-level Map would count
+// to one and reset — a limiter that looks like it works locally and does
+// nothing at all in production.
+//
+// `day` is a DATE in the database's timezone (UTC on Supabase), so quotas reset
+// at 00:00 UTC rather than in the user's own timezone. Deliberate: a per-user
+// local midnight would need a stored timezone and would let someone reset their
+// own quota by changing it.
+export const usageCounters = pgTable(
+  "usage_counters",
+  {
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id),
+    day: date("day").notNull(),
+    action: text("action").notNull(), // 'chat_turn' | 'search'
+    count: integer("count").notNull().default(0),
+  },
+  // Composite primary key, which is also the only way this table is ever read
+  // or written. It is what makes the check-and-increment a single atomic
+  // INSERT ... ON CONFLICT — see lib/usage/quota.ts for why that matters.
+  (t) => [primaryKey({ columns: [t.userId, t.day, t.action] })],
 );
 
 export const drafts = pgTable("drafts", {

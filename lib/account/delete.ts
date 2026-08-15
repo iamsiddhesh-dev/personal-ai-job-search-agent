@@ -37,6 +37,7 @@ import {
   messages,
   profiles,
   runs,
+  usageCounters,
   userApiKeys,
   users,
 } from "@/db/schema";
@@ -54,6 +55,8 @@ export interface DeleteAccountResult {
   profiles: number;
   /** Their own encrypted provider keys (Phase D BYOK). */
   apiKeys: number;
+  /** Daily quota counter rows (Phase D). */
+  usageRows: number;
   /** Objects removed from the user's `${userId}/` prefix in the resumes bucket. */
   storageObjects: number;
   /**
@@ -188,6 +191,15 @@ export async function deleteAccount(userId: string): Promise<DeleteAccountResult
       })
     ).length;
 
+    // Their quota counters (Phase D). Not personal data in any interesting
+    // sense — a per-day integer — but the FK is NO ACTION like the rest, so
+    // leaving them here would fail the delete below rather than leak anything.
+    const deletedUsageRows = (
+      await tx.delete(usageCounters).where(eq(usageCounters.userId, userId)).returning({
+        action: usageCounters.action,
+      })
+    ).length;
+
     // Last. If anything above missed a child row, this is where it fails —
     // loudly, and the whole transaction rolls back with the account intact.
     // That is the entire argument for leaving the FKs at NO ACTION.
@@ -202,6 +214,7 @@ export async function deleteAccount(userId: string): Promise<DeleteAccountResult
       applications: deletedApplications,
       profiles: deletedProfiles,
       apiKeys: deletedApiKeys,
+      usageRows: deletedUsageRows,
     };
   });
 

@@ -31,6 +31,10 @@ import { summarizeTurns } from "@/lib/chat/summarize";
 import { getOrCreateUser, UUID_RX } from "@/lib/user";
 import { keyringFor, touchKeys } from "@/lib/keys/store";
 import { providersUsingCallerKeys } from "@/lib/llm";
+import { consume, quotaMessage } from "@/lib/usage/quota";
+import { db } from "@/lib/db";
+import { users } from "@/db/schema";
+import { eq } from "drizzle-orm";
 
 // Vercel Hobby caps a serverless function at 60s, and past that the platform
 // kills the request mid-stream with no chance to say anything. The turn budget
@@ -119,6 +123,34 @@ export async function POST(req: Request) {
   // Plaintext, server-only, alive for this request only — it is handed to
   // lib/llm and to nothing else.
   const callerKeys = await keyringFor(userId);
+
+  // Quota, BEFORE the thread is touched (SCALE-PLAN D.2). Deliberately ahead of
+  // createConversation/appendMessages: a refused turn never happened, and
+  // storing the user's message first would leave them a thread with a dangling
+  // unanswered line every time they hit the cap. That is the opposite of the
+  // Phase B rule just below, where a message IS stored before a turn that might
+  // fail — the difference is that a failed turn was attempted and a refused one
+  // was not.
+  const [account] = await db
+    .select({ isAnonymous: users.isAnonymous })
+    .from(users)
+    .where(eq(users.id, userId))
+    .limit(1);
+  const isAnonymous = account?.isAnonymous ?? true;
+
+  const quota = await consume(userId, "chat_turn", { isAnonymous, caller: callerKeys });
+  if (!quota.allowed) {
+    console.log(`[chat] quota refused ${userId}: ${quota.used}/${quota.limit} chat turns today`);
+    // A one-event ndjson stream rather than a 429. The client renders `error`
+    // events as an ordinary agent bubble (see ConversationPanel), so the user
+    // gets a sentence in the agent's voice instead of a status code — which is
+    // exactly what SCALE-PLAN's verification asks for. Status stays 200
+    // because the request was understood and answered; the answer is no.
+    return new Response(
+      JSON.stringify({ type: "error", message: quotaMessage("chat_turn", isAnonymous) }) + "\n",
+      { headers: { "Content-Type": "application/x-ndjson", "Cache-Control": "no-cache" } },
+    );
+  }
 
   const requestedId = typeof body.conversationId === "string" ? body.conversationId : null;
   let conversationId: string;
@@ -285,6 +317,7 @@ export async function POST(req: Request) {
         summary,
         recentMemeIds: memeIds,
         signal: abort.signal,
+        isAnonymous,
         callerKeys,
       });
       // Whichever side loses the race must not reject unhandled: past the

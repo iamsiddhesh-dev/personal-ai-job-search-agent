@@ -56,6 +56,9 @@ const ctx: ToolContext = {
   collectedJobs: [],
   sentMemeThisTurn: false,
   recentMemeIds: [],
+  // Only used by the search quota, which this script never reaches — it builds
+  // the tool schemas to measure their size and never executes one.
+  isAnonymous: true,
 };
 
 // Tool schemas are not free: each one ships its name, description and full JSON

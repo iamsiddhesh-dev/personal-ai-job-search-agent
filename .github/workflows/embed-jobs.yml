@@ -8,7 +8,7 @@
 # rather than on a second schedule: this workflow already runs 4x a day against
 # the same database, and it exists partly to keep the Supabase project from
 # auto-pausing after 7 days idle. Today that is the 30-day archived-conversation
-# sweep (Phase C) and the llm_cache prune (Phase D).
+# sweep (Phase C), the llm_cache prune and the usage-counter sweep (Phase D).
 #
 # Trigger: "Run workflow" (workflow_dispatch) to start now, plus a schedule that
 # resumes/maintains automatically. Each run is bounded to ~5h20m so it stays
@@ -60,6 +60,12 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: npm run sweep:llm-cache:ci
+      # Quota counters for days nobody reads any more. 90-day retention, so the
+      # real usage record survives long enough to size the next round of limits.
+      - name: Sweep old usage counters (90 days)
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: npm run sweep:usage-counters:ci
       - name: Embed jobs (Cohere, conservatively paced)
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}

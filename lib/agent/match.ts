@@ -31,7 +31,7 @@
 import { db } from "@/lib/db";
 import { jobs, companies } from "@/db/schema";
 import { and, eq, or, ilike, sql, notInArray, isNotNull, type SQL } from "drizzle-orm";
-import { extractStructured } from "@/lib/llm";
+import { extractStructured, type CallerKeys } from "@/lib/llm";
 import { CACHE_TTL_MS } from "@/lib/llm/cache";
 import { mapLimit, UA } from "@/lib/sources/http";
 import { z } from "zod";
@@ -108,6 +108,10 @@ export interface MatchOptions {
   minResultsBeforeFallback?: number; // default 5
   maxResults?: number; // hard cap on returned results; default 40
   verifyLinks?: boolean; // live-check the final apply URLs; default true
+  // The caller's own provider keys (SCALE-PLAN D.1). Passed through to the
+  // Stage-3 re-rank so a BYOK user's search runs on their quota, which is what
+  // makes the search-quota exemption in lib/usage/quota.ts truthful.
+  caller?: CallerKeys;
   log?: (msg: string) => void;
 }
 
@@ -833,6 +837,7 @@ export async function runMatch(profile: MatchProfile, opts: MatchOptions): Promi
       // because scripts/sweep-llm-cache.ts deletes on the same number and the
       // two must not drift apart.
       cacheTtlMs: CACHE_TTL_MS.rerank,
+      caller: opts.caller,
     }),
   );
   log(`  LLM scored ${batches.length} batch(es) of up to ${RERANK_BATCH_SIZE} jobs each`);
