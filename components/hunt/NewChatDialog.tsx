@@ -102,8 +102,8 @@ export function NewChatDialog({
           you are and won&apos;t ask for your resume again.
         </p>
         <p className="mt-2 text-sm text-bone/50">
-          This conversation moves to <span className="text-bone/70">Your usage &amp; past chats</span>,
-          where you can reopen it for the next 30 days.
+          This conversation moves to <span className="text-bone/70">Usage &amp; past chats</span>, where
+          you can reopen it for the next 30 days.
         </p>
 
         {error && <p className="mt-2 text-sm text-red-400">{error}</p>}

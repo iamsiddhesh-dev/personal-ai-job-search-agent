@@ -31,6 +31,7 @@
     "sweep:llm-cache:ci": "node node_modules/tsx/dist/cli.mjs scripts/sweep-llm-cache.ts",
     "sweep:usage-counters": "node --env-file=.env node_modules/tsx/dist/cli.mjs scripts/sweep-usage-counters.ts",
     "sweep:usage-counters:ci": "node node_modules/tsx/dist/cli.mjs scripts/sweep-usage-counters.ts",
+    "redact:secrets": "node --env-file=.env node_modules/tsx/dist/cli.mjs scripts/redact-secrets.ts",
     "measure:tokens": "node --env-file=.env node_modules/tsx/dist/cli.mjs scripts/measure-chat-tokens.ts",
     "probe:providers": "node --env-file=.env node_modules/tsx/dist/cli.mjs scripts/probe-providers.ts"
   },

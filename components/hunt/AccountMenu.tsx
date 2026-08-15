@@ -227,7 +227,12 @@ export function AccountMenu({ onNewChat, onOpenThread }: AccountMenuProps) {
               className="flex w-full items-center gap-2 px-3 py-2 font-body text-sm text-bone/80 hover:bg-bone/10 disabled:opacity-50"
             >
               <Gauge size={14} />
-              Your usage &amp; past chats
+              {/* Kept short deliberately: at w-56 the longer "Your usage & past
+                  chats" wrapped onto a second line while every other entry is
+                  one, which made the menu look broken. `whitespace-nowrap` so a
+                  future edit that lengthens it fails visibly rather than
+                  silently re-wrapping. */}
+              <span className="whitespace-nowrap">Usage &amp; past chats</span>
             </button>
           )}
           {onNewChat && (

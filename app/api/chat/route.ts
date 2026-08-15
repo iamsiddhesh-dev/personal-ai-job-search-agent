@@ -30,6 +30,7 @@ import { agentErrorMessage } from "@/lib/chat/errors";
 import { summarizeTurns } from "@/lib/chat/summarize";
 import { getOrCreateUser, UUID_RX } from "@/lib/user";
 import { keyringFor, touchKeys } from "@/lib/keys/store";
+import { redactApiKeys } from "@/lib/keys/redact";
 import { providersUsingCallerKeys } from "@/lib/llm";
 import { consume, quotaMessage } from "@/lib/usage/quota";
 import { db } from "@/lib/db";
@@ -102,8 +103,21 @@ function jobsLine(jobs: { title: string; company: string }[]): string {
 export async function POST(req: Request) {
   const deadlineAt = Date.now() + TURN_DEADLINE_MS;
   const body = (await req.json()) as ChatRequest;
-  const message = typeof body.message === "string" ? body.message.trim() : "";
-  const displayText = typeof body.displayText === "string" ? body.displayText.trim() : "";
+  // Redacted at the very edge, before anything else touches it — the message is
+  // stored before the turn runs (see below) and then replayed to the providers
+  // as history on every later turn, so a key that gets past this line is
+  // already burned. The system prompt tells the agent never to ASK for a key;
+  // this is what handles someone pasting one regardless. See lib/keys/redact.ts.
+  const rawMessage = typeof body.message === "string" ? body.message.trim() : "";
+  const message = redactApiKeys(rawMessage);
+  if (message !== rawMessage) {
+    // Worth a line, without the key in it: it means a user tried to hand us a
+    // credential in the chat, which is a UX signal as much as a security one.
+    console.warn("[chat] redacted an api key from an inbound message");
+  }
+  const displayText = redactApiKeys(
+    typeof body.displayText === "string" ? body.displayText.trim() : "",
+  );
 
   if (!message) {
     return Response.json({ error: "message is required." }, { status: 400 });

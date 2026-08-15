@@ -167,7 +167,16 @@ async function main() {
   const saved = Math.round(((before - after) / before) * 100);
   console.log(`\n${before} -> ${after} tokens per turn (${saved}% smaller).`);
   console.log(
-    `concurrent turns per minute on one 8k key: ${Math.floor(8000 / before)} -> ${Math.floor(8000 / after)}`,
+    // 24k, not 8k: groq meters tokens PER MODEL, and chatModelChain() stacks
+    // three chat-capable groq models on one account (8k each, measured from the
+    // x-ratelimit headers in Phase D). The old line here said "one 8k key" and
+    // understated real capacity by 3x.
+    //
+    // Still an OPTIMISTIC ceiling, for the reason Phase B found: this estimates
+    // ONE model call, and stopWhen: stepCountIs(6) means a turn that calls a
+    // tool pays the payload again on every step. Size quotas off the
+    // `[chat] tokens … steps=` log on a real transcript, not off this number.
+    `concurrent turns per minute across the 24k chat pool: ${Math.floor(24000 / before)} -> ${Math.floor(24000 / after)}`,
   );
   console.log(
     "\nAnd the second call that is gone entirely: the old route re-summarized every",

@@ -220,8 +220,12 @@ export function UsagePanel({
 
       <div className="relative flex max-h-[85dvh] w-full max-w-md flex-col overflow-hidden rounded-2xl border border-bone/10 bg-[#16161c] font-body text-bone shadow-2xl">
         <div className="flex items-center justify-between border-b border-bone/10 px-5 py-3">
+          {/* Matches the menu entry and the sentence in NewChatDialog word for
+              word. That dialog tells people where their conversation went, and
+              a pointer that does not match the thing it points at is worse than
+              no pointer. */}
           <h2 id="usage-title" className="font-hunt text-base font-bold">
-            Your usage
+            Usage &amp; past chats
           </h2>
           <button
             ref={closeRef}
