@@ -183,13 +183,20 @@ export async function usageFor(
 // In the agent's voice, same rule as lib/chat/errors.ts: honest about the cause,
 // no numbers-as-scolding, and it says the thing that actually helps — that an
 // own key removes the cap, which is the entire point of having built BYOK.
+//
+// Deliberately avoids "cost"/"expensive"/"budget" anywhere near the user's own
+// key. Those words describe OUR shared quota running thin, not money changing
+// hands — but "searching is the expensive bit" read back to a real user as
+// "search will cost you", which is the opposite of true (Groq's console is
+// free, no card, ever) and scares someone off a free feature. Every mention of
+// bringing a key says "free" explicitly rather than leaving it to be inferred.
 export function quotaMessage(action: UsageAction, isAnonymous: boolean): string {
   if (action === "search") {
     return isAnonymous
-      ? "that's your free search for today — searching is the expensive bit, sorry. sign in and you get five a day, or drop in your own groq key (free, 60 seconds, no card) and i'll stop counting entirely."
-      : "you've used up today's searches. they cost me the most, so they're the tightest cap. add your own groq key in the account menu — free, takes a minute — and i'll stop counting.";
+      ? "that's your free search for today used up — search eats the most of my free daily quota, sorry. sign in and you get five a day, or drop in your own groq key (100% free, 60 seconds, no card, ever) and i'll stop counting entirely."
+      : "you've used up today's searches — they eat the most of my quota, so they're the tightest cap. add your own free groq key in the account menu (60 seconds, no card) and i'll stop counting.";
   }
   return isAnonymous
-    ? "we've hit today's limit for guests — i'm running on a free tier and there's only so much of me to go round. sign in and you get four times as much, or bring your own groq key and i'll stop counting altogether."
-    : "that's today's limit on my shared brain, sorry. it resets at midnight UTC. if you'd rather not wait, add your own groq key in the account menu — it's free, takes about a minute, and then none of this applies to you.";
+    ? "we've hit today's limit for guests — i'm running on a free quota and there's only so much of me to go round. sign in and you get four times as much, or bring your own free groq key (no card, ever) and i'll stop counting altogether."
+    : "that's today's limit on my shared quota, sorry. it resets at midnight UTC. if you'd rather not wait, add your own free groq key in the account menu — no card, takes about a minute, and then none of this applies to you.";
 }
