@@ -135,8 +135,9 @@ HOW YOU WORK
 - the conversation NEVER ends. after results, drafts, anything — stay in it and suggest the next useful thing.
 - NEVER invent a job, company, score, or link. only ever describe what a tool returned.
 - NEVER ask for or accept an api key here, and never repeat one back — a key typed in chat is saved and re-sent to the model every turn, so it's burned. if they paste one: don't echo it, tell them to revoke it at console.groq.com and add the new one in the account menu under "Usage & past chats". that panel is the only place keys go, signed in only.
-- groq's console is FREE — no card, no payment, ever. if the topic of their own key comes up, say plainly it costs nothing and takes about a minute. NEVER use the words "paid", "payment", "billing", "subscription" or "purchase" anywhere near it — there is nothing to pay for, and saying otherwise is a straight-up lie that scares people off a free thing.
+- groq's console is FREE — no card, no payment, ever. if the topic of their own key comes up, say plainly it costs nothing and takes about a minute. NEVER use the words "paid", "payment", "billing", "subscription" or "purchase" anywhere, about anything, for any reason — this whole app costs the user nothing, full stop, and saying otherwise (even to explain an error) is a lie that scares people off a free thing.
 - the account menu holds EXACTLY: sign in/up, "Usage & past chats", "New chat", "Delete my data". never describe a button, box or setting that isn't one of those — if you don't know where something lives, say so instead of guessing.
+- NEVER name, recommend, or point them at another job board, job-search product or company's own careers page as a place to search — not wellfound, not linkedin, not indeed, not anywhere. this database is the whole product; sending someone elsewhere is never the right answer, not even as a stopgap during an error. if a search comes back empty or a tool fails, say so honestly in one plain sentence (the tool result already tells you what happened — use it) and offer to try again. never invent a reason for a failure and never fill the gap with an alternative source.
 - job results render as cards in the ui automatically — don't re-list them in text. say what stands out and why in a sentence or two, then invite the next step.
 - when a system note says a resume REPLACED an older one: say what changed, then OFFER a fresh chat once ("want me to start clean with this one?"). they start it from the account menu, you can't — and the old chat is theirs to keep, so never push it twice.`;
 
@@ -355,17 +356,41 @@ export function buildTools(ctx: ToolContext, gate: ToolGate): ToolSet {
         }
 
         ctx.emit({ type: "status", message: "searching the job database…" });
-        const excludeJobIds = await getExcludedJobIds(ctx.userId);
-        const results = await runMatch(matchProfile, {
-          roleFocus,
-          locationPref: locationPref as LocationPref,
-          teamSizeBucket: teamSizeBucket as TeamSizeBucket,
-          excludeJobIds,
-          log: (m) => ctx.emit({ type: "status", message: m }),
-          // So the LLM re-rank — the expensive part of a search — runs on the
-          // user's own key when they have one.
-          caller: ctx.callerKeys,
-        });
+        // Never let anything below this line throw uncaught. If it does, the
+        // exception does not become a server error page — the AI SDK catches
+        // an uncaught tool-execute error and hands the raw thing to the MODEL
+        // as the tool's own result (verified against
+        // node_modules/ai/dist/index.js's executeToolCall). With nothing
+        // telling it what a raw failure means, a live turn showed exactly
+        // what it does with one: it invented an excuse and told a real user
+        // to go search a competitor's site instead — see the incident on
+        // looksLikeQuotaOrServerError in lib/llm/index.ts. Every other branch
+        // in this tool already returns `{ ok: false, reason }` instead of
+        // throwing; this is the one gap that let a raw exception through, and
+        // Stage 3's mapLimit isolation (match.ts) is the same fix one layer
+        // down — this catch is what stands in front of every OTHER way a
+        // search can fail, not just that one.
+        let results;
+        try {
+          const excludeJobIds = await getExcludedJobIds(ctx.userId);
+          results = await runMatch(matchProfile, {
+            roleFocus,
+            locationPref: locationPref as LocationPref,
+            teamSizeBucket: teamSizeBucket as TeamSizeBucket,
+            excludeJobIds,
+            log: (m) => ctx.emit({ type: "status", message: m }),
+            // So the LLM re-rank — the expensive part of a search — runs on the
+            // user's own key when they have one.
+            caller: ctx.callerKeys,
+          });
+        } catch (err) {
+          console.error("[chat] search failed:", err);
+          return {
+            ok: false as const,
+            reason:
+              "the search itself hit a snag on my end — say that again and i'll give it another go.",
+          };
+        }
 
         // Persist so each card carries a matches.id that outreach drafts can
         // reference. A persistence failure must not lose good results.

@@ -848,23 +848,50 @@ export async function runMatch(profile: MatchProfile, opts: MatchOptions): Promi
 
   log("Stage 3 — LLM re-rank");
   const batches = chunk(ranked, RERANK_BATCH_SIZE);
-  const batchResults = await mapLimit(batches, RERANK_CONCURRENCY, (batch) =>
-    extractStructured({
-      task: "rerank",
-      prompt: rerankPrompt(profile, batch),
-      schema: rerankSchema,
-      // Same profile scored against the same batch of jobs is the same
-      // question — a real possibility since re-running a search minutes apart
-      // (or two people/tabs triggering the same search) reuses the exact same
-      // Stage-2 shortlist. Short TTL because the underlying job pool changes
-      // as the harvester runs and postings close — defined in lib/llm/cache.ts
-      // because scripts/sweep-llm-cache.ts deletes on the same number and the
-      // two must not drift apart.
-      cacheTtlMs: CACHE_TTL_MS.rerank,
-      caller: opts.caller,
-    }),
+  // Each batch's failure is isolated HERE, inside the mapper, rather than
+  // letting it reject mapLimit's Promise.all. mapLimit itself has no
+  // isolation — one rejected call kills every other in-flight batch too — and
+  // until 2026-08-19 that meant a single provider hiccup on one batch of 8
+  // could throw out of runMatch entirely, uncaught, all the way out of
+  // searchJobs's tool call. The AI SDK then hands that raw exception to the
+  // MODEL as the tool's result (verified against node_modules/ai/dist/index.js's
+  // executeToolCall), and a live turn showed exactly what a model does with an
+  // unexplained raw failure: it improvised an excuse and recommended the user
+  // search a competitor's site instead — see the incident writeup on
+  // looksLikeQuotaOrServerError in lib/llm/index.ts.
+  //
+  // A failed batch returns zero matches rather than aborting the search: with
+  // 3 batches of 8, losing one still returns real results for the other 16,
+  // a graceful degradation in the same spirit as hardenResumeFacts's
+  // non-fatal design. Logged server-side only, so a provider hiccup is
+  // visible to us without costing the user their whole search.
+  let failedBatches = 0;
+  const batchResults = await mapLimit(batches, RERANK_CONCURRENCY, async (batch) => {
+    try {
+      return await extractStructured({
+        task: "rerank",
+        prompt: rerankPrompt(profile, batch),
+        schema: rerankSchema,
+        // Same profile scored against the same batch of jobs is the same
+        // question — a real possibility since re-running a search minutes apart
+        // (or two people/tabs triggering the same search) reuses the exact same
+        // Stage-2 shortlist. Short TTL because the underlying job pool changes
+        // as the harvester runs and postings close — defined in lib/llm/cache.ts
+        // because scripts/sweep-llm-cache.ts deletes on the same number and the
+        // two must not drift apart.
+        cacheTtlMs: CACHE_TTL_MS.rerank,
+        caller: opts.caller,
+      });
+    } catch (err) {
+      failedBatches++;
+      console.error("[match] rerank batch failed, dropping it from this search:", err);
+      return { matches: [] };
+    }
+  });
+  log(
+    `  LLM scored ${batches.length} batch(es) of up to ${RERANK_BATCH_SIZE} jobs each` +
+      (failedBatches > 0 ? ` (${failedBatches} batch(es) failed and were dropped)` : ""),
   );
-  log(`  LLM scored ${batches.length} batch(es) of up to ${RERANK_BATCH_SIZE} jobs each`);
 
   // Map each batch's 1-based indices back onto the overall `ranked` array,
   // dropping any out-of-range or duplicate index the model might hallucinate.

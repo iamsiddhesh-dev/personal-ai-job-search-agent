@@ -207,9 +207,29 @@ const TASK_ROUTES: Record<LlmTask, ModelStep[]> = {
 // no "quota" and no "rate limit", and so was being reported to users as an
 // unexplained glitch when it is exactly the capacity problem we have honest
 // copy for. Seen live on 2026-08-14.
+//
+// 402 added 2026-08-19 after a live incident: a provider returned Payment
+// Required (a capacity-tier gate, not a real bill — nobody's card is ever
+// charged for this app's own usage), it fell through this check unrecognized,
+// shouldFailOver() therefore said "real bug, don't retry", extractStructured
+// threw on the FIRST hop instead of walking the rest of the chain, and
+// lib/agent/match.ts's Stage-3 mapLimit call had no per-batch isolation — so
+// one provider's 402 killed the entire search and threw out of searchJobs's
+// tool call uncaught. The AI SDK catches an uncaught tool execution error and
+// hands the raw text back to the MODEL as the tool's result (verified against
+// node_modules/ai/dist/index.js's executeToolCall), and with nothing telling
+// it what a raw tool failure means, it improvised — telling a real user their
+// search API "spat a payment required error" and then, disastrously,
+// recommending they search Wellfound instead. For a product whose entire
+// point is its own job database, an agent that free-associates its way to a
+// competitor's product is close to the worst failure this codebase can have.
+// The other two fixes for the same incident are in lib/agent/match.ts (batch
+// isolation) and lib/chat/agent.ts (searchJobs never lets an exception reach
+// the model raw, and the prompt now says explicitly never to name another
+// job board under any circumstance).
 export function looksLikeQuotaOrServerError(err: unknown): boolean {
   const status = (err as { statusCode?: number })?.statusCode;
-  if (typeof status === "number" && (status === 429 || status >= 500)) return true;
+  if (typeof status === "number" && (status === 402 || status === 429 || status >= 500)) return true;
 
   // Named conditions only — no bare `5\d\d`. A raw three-digit match reads
   // "prompt is 512 tokens over the window" as a server outage, which would put
@@ -217,7 +237,7 @@ export function looksLikeQuotaOrServerError(err: unknown): boolean {
   // else entirely. If a genuine 5xx has no status attached, it says what it is
   // in words.
   const msg = err instanceof Error ? err.message : String(err);
-  return /\b429\b|quota|rate.?limit|RESOURCE_EXHAUSTED|high demand|overload|at capacity|temporarily unavailable|service unavailable|internal server error|bad gateway|gateway timeout|try again later/i.test(
+  return /\b402\b|\b429\b|quota|rate.?limit|payment required|RESOURCE_EXHAUSTED|high demand|overload|at capacity|temporarily unavailable|service unavailable|internal server error|bad gateway|gateway timeout|try again later/i.test(
     msg,
   );
 }
